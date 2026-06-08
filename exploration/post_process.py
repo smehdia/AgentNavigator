@@ -20,7 +20,18 @@ import matplotlib.pyplot as plt
 import traceback
 import dashscope
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
+
+from networkx.readwrite import json_graph
+from FlagEmbedding import BGEM3FlagModel
+
+from lightrag import LightRAG
+from lightrag.utils import EmbeddingFunc
+from lightrag.kg.shared_storage import initialize_pipeline_status
+from lightrag.llm.openai import openai_complete_if_cache
+
 
 
 for var in ["http_proxy", "https_proxy", "ftp_proxy", "socks_proxy", 
@@ -148,6 +159,153 @@ def build_paths_for_node(nx_graph, node_id):
     return paths
 
 
+def save_node_intents_and_navigation_plans(nx_graph, vlm_client, configs, dbg):
+    node_intents = dict()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for node_id in tqdm(nx_graph.nodes(), total=len(nx_graph.nodes())):
+            node_intents[node_id] = {}
+
+            paths = build_paths_for_node(nx_graph, node_id)
+            if not paths:
+                continue
+
+            out_edges_all = [
+                attrs["description"]
+                for _, _, attrs in nx_graph.out_edges(node_id, data=True)
+            ]
+
+            out_edges = [
+                d for d in out_edges_all
+                if not (isinstance(d, str) and ("scroll" in d.lower() or "swipe" in d.lower()))
+            ] or out_edges_all
+
+            primary_path = min(
+                paths.values(),
+                key=lambda v: len(v.get("actions", []))
+            )
+
+            with dbg.time_block(f"VLM calls for node {node_id}"):
+                future_intents = executor.submit(
+                    vlm_client.get_node_user_intents, primary_path, out_edges
+                )
+                future_plans = executor.submit(
+                    vlm_client.get_node_navigation_plans, paths
+                )
+                intent_output = future_intents.result()
+                navigation_plans = future_plans.result()
+
+            user_intents = list(dict.fromkeys(intent_output.get("user_intents", [])))
+            node_intents[node_id]["user_intents"] = user_intents
+            node_intents[node_id]["ui_navigation_memory"] = [
+                item["ui_navigation_memory"] for item in navigation_plans
+            ]
+   
+
+    with open(os.path.join(configs.logs.root, "node_intents.json"), "w", encoding="utf-8") as f:
+        json.dump(node_intents, f, ensure_ascii=False, indent=4)
+
+    return 
+
+
+
+def add_node_embeddings_to_user_intents(
+    root_path,
+    graph_filename="graph.json",
+    user_intents_filename="user_intents.json",
+    output_filename="user_intents_with_embeddings.json",
+    bge_model_name="BAAI/bge-m3",
+    batch_size=4,
+    max_length=8192,
+):
+    """
+    root_path must contain:
+        - graph.json
+        - user_intents.json
+
+    Creates:
+        - user_intents_with_embeddings.json
+
+    Each node gets:
+        - embedding_text
+        - embedding
+    """
+
+    graph_path = os.path.join(root_path, graph_filename)
+    user_intents_path = os.path.join(root_path, user_intents_filename)
+    output_path = os.path.join(root_path, output_filename)
+
+    with open(graph_path, "r", encoding="utf-8") as f:
+        graph_data = json.load(f)
+
+    graph = json_graph.node_link_graph(graph_data, edges="links")
+
+    with open(user_intents_path, "r", encoding="utf-8") as f:
+        user_intents_data = json.load(f)
+
+    node_ids = []
+    embedding_texts = []
+
+    for node_id, intent_data in user_intents_data.items():
+        node_data = graph.nodes.get(node_id, {})
+
+        page_purpose = node_data.get("page_purpose", "")
+        active_tab = node_data.get("active_tab", "")
+        active_subtab = node_data.get("active_subtab", "")
+        user_intents = intent_data.get("user_intents", [])
+
+        embedding_text = f"""
+PAGE_PURPOSE:
+{page_purpose}
+
+ACTIVE_TAB:
+{active_tab}
+
+ACTIVE_SUBTAB:
+{active_subtab}
+
+USER_INTENTS:
+{json.dumps(user_intents, ensure_ascii=False)}
+""".strip()
+
+        node_ids.append(node_id)
+        embedding_texts.append(embedding_text)
+
+    model = BGEM3FlagModel(
+        bge_model_name,
+        use_fp16=True,
+    )
+
+    outputs = model.encode(
+        embedding_texts,
+        batch_size=batch_size,
+        max_length=max_length,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    )
+
+    embeddings = np.asarray(outputs["dense_vecs"], dtype=np.float32)
+
+    # Normalize for cosine similarity.
+    embeddings = embeddings / np.maximum(
+        np.linalg.norm(embeddings, axis=1, keepdims=True),
+        1e-12,
+    )
+
+    for i, node_id in enumerate(node_ids):
+        user_intents_data[node_id]["embedding_text"] = embedding_texts[i]
+        user_intents_data[node_id]["embedding"] = embeddings[i].tolist()
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(user_intents_data, f, ensure_ascii=False, indent=4)
+
+    return {
+        "num_nodes": len(node_ids),
+        "output_path": output_path,
+        "embedding_dim": int(embeddings.shape[1]),
+    }
+
 
 if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
@@ -172,73 +330,12 @@ if __name__ == "__main__":
 
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
-    node_intents = dict()
+    save_node_intents_and_navigation_plans(nx_graph, vlm_client, configs, dbg)
 
-    for i, node_id in tqdm(enumerate(nx_graph.nodes()), total=len(nx_graph.nodes())):
-        node_intents[node_id] = {
-            "user_intents": [],
-            "ui_navigation_memory": [],
-        }
+    dbg.log("Node intents and navigation plans saved successfully", color="green")
+    dbg.log("Stage 2, save indices for Retrieval", color="green")
 
-        paths = build_paths_for_node(nx_graph, node_id)
-
-        if not paths:
-            continue
-
-        out_edges_all = [
-            attrs["description"]
-            for _, _, attrs in list(nx_graph.out_edges(node_id, data=True))
-        ]
-
-        if len(out_edges_all) > 1:
-            non_scroll_swipe = [
-                d for d in out_edges_all
-                if not (
-                    isinstance(d, str)
-                    and (("scroll" in d.lower()) or ("swipe" in d.lower()))
-                )
-            ]
-            out_edges = non_scroll_swipe if non_scroll_swipe else out_edges_all
-        else:
-            out_edges = out_edges_all
-
-        # choose one visual path for user_intents
-        primary_root_id, primary_path = min(
-            paths.items(),
-            key=lambda item: len(item[1].get("actions", []))
-        )
-
-        with dbg.time_block(f"Generating user intents for node {node_id}"):
-            intent_output = vlm_client.get_node_user_intents(
-                primary_path,
-                out_edges
-            )
-
-            node_intents[node_id]["user_intents"] = intent_output.get(
-                "user_intents",
-                []
-            )
-
-        # generate route plans for all paths using text only
-        with dbg.time_block(f"Generating navigation plans for node {node_id}"):
-            navigation_plans = vlm_client.get_node_navigation_plans(paths)
-            only_memories = [
-                item["ui_navigation_memory"]
-                for item in navigation_plans
-            ]
-            node_intents[node_id]["ui_navigation_memory"] = only_memories
-
-
-        # deduplicate intents
-        node_intents[node_id]["user_intents"] = list(dict.fromkeys(
-            node_intents[node_id]["user_intents"]
-        ))
-
-
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "w", encoding="utf-8") as f:
-        json.dump(node_intents, f, ensure_ascii=False, indent=4)
-
-
+    add_node_embeddings_to_user_intents(configs.logs.root, "graph.json", "node_intents.json", "node_intents.json")
 
 
     
