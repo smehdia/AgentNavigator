@@ -21,12 +21,12 @@ Follow these steps before a long run. Skipping device checks is the most common 
 
 | Setting | YAML keys | What you must get right |
 |---------|-----------|-------------------------|
-| **App identity** | `driver.appPackage`, `driver.appActivity` | `appPackage` must match the installed app. `appActivity` is the launcher activity (see [resolve activity](#resolve-apppackage-and-appactivity-android)); required even when using launcher intent. |
-| **Launcher launch** | `driver.use_launcher_intent` or `$` in `appActivity` | Some apps (e.g. YouTube `Shell$HomeActivity`) break `am start -n pkg/activity` through `adb shell` because `$` is stripped. Set `use_launcher_intent: true` or use an activity name containing `$` (auto-detected on Android). |
-| **Force-close + relaunch** | `close_application()` (in reset) | **`am force-stop` / `aa force-stop`** on `appPackage` kills the process (avoids YouTube-style “minimized in Recents” after Back only). Then `run_application()` cold-starts the app. |
+| **App identity** | `driver.appPackage`, `driver.appActivity` | `appPackage` must match the installed app. **Android:** `appActivity` is the launcher activity (see [resolve activity](#resolve-apppackage-and-appactivity-android)). **Harmony:** `appActivity` is the **entry ability** / `mainElementName` from `bm dump` (see [resolve entry ability](#resolve-apppackage-and-appactivity-harmony)). |
+| **Launcher launch** | `driver.use_launcher_intent` or `$` in `appActivity` | **Android only.** Some apps (e.g. YouTube `Shell$HomeActivity`) break `am start -n pkg/activity` through `adb shell` because `$` is stripped. Set `use_launcher_intent: true` or use an activity name containing `$` (auto-detected on Android). |
+| **Force-close + relaunch** | `close_application()` (in reset) | **`am force-stop` / `aa force-stop`** on `appPackage` kills the process (avoids YouTube-style “minimized in Recents” after Back only). Then `run_application()` cold-starts the app. **Always verify both methods on the device** before a long run (see checklist below). |
 | **Scroll to top** | (in reset, after launch) | One centered **scroll up** swipe (~35% screen height) so feeds/lists start near the top before the agent loop. |
 | **Reset instruction** | `driver.reset_instruction` | **Required for reliable exploration.** Natural-language goal for the agent loop **after** force-stop, launch, and scroll-up. The agent must reach your canonical tab/screen and return **`finished`**. Without this, reset only relaunches the app and may leave you on the wrong tab, splash, or a dialog. |
-| **Foreground detection** | `AndroidDriver.get_foreground_package()` | When `driver.skip_exploration_for_no_app_package: true`, Walker stops the walk if foreground ≠ `appPackage`. **Test on several in-app screens** (tabs, settings, sheets) — not only right after reset. |
+| **Foreground detection** | `get_foreground_package()` | When `driver.skip_exploration_for_no_app_package: true`, Walker stops the walk if foreground ≠ `appPackage`. **Test on several in-app screens** (tabs, settings, sheets) — not only right after reset. Implemented on **Android** (`dumpsys window`) and **Harmony** (`uitest dumpLayout` bundle grep). |
 
 #### Resolve `appPackage` and `appActivity` (Android)
 
@@ -47,6 +47,34 @@ adb -s YOUR_DEVICE_ID shell am start -W -n YOUR.PACKAGE/YOUR.ACTIVITY
 adb -s YOUR_DEVICE_ID shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p YOUR.PACKAGE
 ```
 
+#### Resolve `appPackage` and `appActivity` (Harmony)
+
+Harmony uses **bundle name** + **entry ability** (`mainElementName`). Put the ability name in YAML as `driver.appActivity`.
+
+Get the entry ability for a package:
+
+```bash
+hdc -t {device_id} shell "bm dump -n APP_PACKAGE_NAME | grep '\"mainElementName\"' | sed -E 's/.*\"mainElementName\": \"([^\"]+)\".*/\1/'"
+# Example:
+hdc -t 3AP0224B05003112 shell "bm dump -n com.huawei.hmos.clock | grep '\"mainElementName\"' | sed -E 's/.*\"mainElementName\": \"([^\"]+)\".*/\1/'"
+```
+
+Or call `driver.get_app_version()` after `build_driver()` — the returned `entry.ability_name` / `entry.launch_command` fields echo the parsed `mainElementName` and a suggested `aa start` command from `bm dump -n`.
+
+Test launch:
+
+```bash
+hdc -t YOUR_DEVICE_ID shell aa start -a YOUR_ABILITY -b YOUR.PACKAGE
+# Example:
+hdc -t YOUR_DEVICE_ID shell aa start -a com.huawei.hmos.clock.phone -b com.huawei.hmos.clock
+```
+
+Test force-stop (same as `close_application()`):
+
+```bash
+hdc -t YOUR_DEVICE_ID shell aa force-stop YOUR.PACKAGE
+```
+
 #### Preflight: `reset_to_start_page()` must work on the device
 
 Watch the phone while you run this (not only assert in Python):
@@ -62,29 +90,45 @@ agent = build_agent(model_name=configs.agent.model_name, url=configs.agent.url, 
 driver = build_driver(settings=configs.driver, agent=agent)
 
 driver.reset_to_start_page()   # back ×5 → force-stop → launch → scroll up → agent until finished
+driver.close_application()
+driver.run_application()
 assert driver.get_foreground_package() == configs.driver.appPackage
 # Screenshot should show your reset_instruction target (e.g. Alarm tab, YouTube Home)
+print(driver.get_app_version())  # Harmony: includes entry.ability_name / entry.launch_command
 ```
 
 Manual force-stop + launch (same as `close_application` + `run_application`):
 
 ```bash
+# Android
 adb -s YOUR_DEVICE_ID shell am force-stop YOUR.PACKAGE
 adb -s YOUR_DEVICE_ID shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p YOUR.PACKAGE
+
+# Harmony
+hdc -t YOUR_DEVICE_ID shell aa force-stop YOUR.PACKAGE
+hdc -t YOUR_DEVICE_ID shell aa start -a YOUR_ABILITY -b YOUR.PACKAGE
 ```
 
 **Checklist before a long run:**
 
 1. **`reset_to_start_page()`** fully kills and relaunches the app (not left in Recents), scrolls toward the top, then leaves the app on the intended start screen (agent returned `finished` if `reset_instruction` is set).
-2. **`get_foreground_package()`** == `appPackage` on that screen and on 2–3 other in-app pages you care about.
-3. **Startup logs** use `logs.root` from **this** YAML — confirm `explore.py --config` / `CONFIG` points at the right file (see step 3).
-4. **`driver.device_id`** matches `adb devices`; **`agent.url`** is healthy.
+2. **`close_application()`** then **`run_application()`** — watch the device: the app must **fully exit** after force-stop and **cold-start** into the target app (not stay in Recents / wrong ability).
+3. **`get_foreground_package()`** == `appPackage` on the start screen and on **2–3 other in-app pages** you care about (tabs, settings, sheets). If this fails on Harmony, fix `appActivity` (entry ability) or the `uitest dumpLayout` grep path before enabling `skip_exploration_for_no_app_package`.
+4. **Startup logs** use `logs.root` from **this** YAML — confirm `explore.py --config` / `CONFIG` points at the right file (see step 3).
+5. **`driver.device_id`** matches `adb devices` (Android) or `hdc list targets` (Harmony); **`agent.url`** is healthy.
 
-Optional:
+Optional connectivity / foreground checks:
 
 ```bash
+# Android
 adb -s YOUR_DEVICE_ID shell echo ok
 adb -s YOUR_DEVICE_ID shell dumpsys window | grep -E 'mCurrentFocus|mFocusedApp|topResumedActivity'
+
+# Harmony
+hdc -t YOUR_DEVICE_ID shell echo ok
+hdc list targets
+# Foreground bundle (same idea as get_foreground_package)
+hdc -t YOUR_DEVICE_ID shell "uitest dumpLayout -p /data/local/tmp/window_dump.json >/dev/null && cat /data/local/tmp/window_dump.json | grep -oE '\"bundleName\":\"[^\"]+\"|\"bundleName\": \"[^\"]+\"' | sed -E 's/.*\"bundleName\"[ ]*:[ ]*\"([^\"]+)\".*/\1/' | grep -vE 'com\.ohos\.sceneboard|com\.ohos\.systemui|com\.ohos\.launcher' | head -n 1"
 ```
 
 ### 2) Create a config file
@@ -108,7 +152,7 @@ default:
 
 | Section | Important keys | Purpose |
 |---------|----------------|---------|
-| **`driver`** | `device_id`, `os_name`, `appPackage`, `appActivity` | Device connection and launch (see `use_launcher_intent`) |
+| **`driver`** | `device_id`, `os_name`, `appPackage`, `appActivity` | Device connection and launch (**Android:** `use_launcher_intent`; **Harmony:** entry ability from `bm dump`) |
 | | `reset_instruction` | **Strongly recommended** — agent loop inside `reset_to_start_page()` (see step 1) |
 | | `use_launcher_intent` | `true` → `am start` with MAIN/LAUNCHER + `appPackage` (for `$` in activity, e.g. YouTube) |
 | | `skip_exploration_for_no_app_package` | Stop walk when foreground leaves `appPackage` |
@@ -698,15 +742,22 @@ driver:
 # appActivity: "com.google.android.youtube.app.honeycomb.Shell$HomeActivity"
 # use_launcher_intent: true
 # reset_instruction: "Go to the Home tab. If already on Home, return finished."
+
+# Example: Harmony Clock
+# os_name: "harmony"
+# device_id: "3AP0224B05003112"
+# appPackage: "com.huawei.hmos.clock"
+# appActivity: "com.huawei.hmos.clock.phone"   # entry ability from bm dump mainElementName
+# reset_instruction: "Go Alarm tab. If Alarm tab is active, return finished."
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
 | `os_name` | yes | `"android"` or `"harmony"` |
-| `device_id` | yes (Android) | adb / hdc device serial |
-| `appPackage` | yes (Android) | Installed package; used for launch, XML filter, foreground checks |
-| `appActivity` | yes (Android) | Launcher activity from `resolve-activity` (relative `.Foo` or full class). Still required when using launcher intent. |
-| `use_launcher_intent` | no | If `true`, Android launch uses `am start -a MAIN -c LAUNCHER -p appPackage` instead of `am start -n pkg/activity`. **Auto-enabled** when `appActivity` contains `$`. |
+| `device_id` | yes | adb / hdc device serial (`adb devices` / `hdc list targets`) |
+| `appPackage` | yes | Installed package / bundle name; used for launch, XML filter, foreground checks |
+| `appActivity` | yes | **Android:** launcher activity from `resolve-activity`. **Harmony:** entry ability / `mainElementName` from [bm dump](#resolve-apppackage-and-appactivity-harmony). |
+| `use_launcher_intent` | no (Android) | If `true`, Android launch uses `am start -a MAIN -c LAUNCHER -p appPackage` instead of `am start -n pkg/activity`. **Auto-enabled** when `appActivity` contains `$`. |
 | `skip_exploration_for_no_app_package` | no (default: treat as off if omitted) | When `true`, `Walker.random_walk` ends the current walk as soon as the foreground app is not `appPackage` (e.g. user opened Chrome from Help, or landed on the home launcher). See [Skip exploration outside target app](#skip-exploration-outside-target-app). |
 | `reset_instruction` | no (but **required in practice**) | Agent instruction for the loop inside `reset_to_start_page()` after force-stop, relaunch, and scroll-up; must end with `finished` on your exploration anchor screen. See [How to run → verify reset](#1-verify-the-driver--especially-reset_to_start_page). |
 
@@ -732,7 +783,8 @@ Pass an optional `BaseAgent` instance so `reset_to_start_page()` can run agent-g
 | `take_screenshot()` | BGR `numpy` array (OpenCV). If `is_keyboard_open()` is true, calls `back()` once first to dismiss the keyboard, then captures the screen |
 | `get_xml_layout()` | UI hierarchy as XML string |
 | `get_current_app_id()` | Foreground package / bundle name, or `None` |
-| `get_foreground_package()` | **Android only** — package from `dumpsys window` (`mCurrentFocus` / `mFocusedApp` / `topResumedActivity`); used by `Walker` when `skip_exploration_for_no_app_package` is true |
+| `get_foreground_package()` | Foreground package / bundle name from platform-specific source; used by `Walker` when `skip_exploration_for_no_app_package` is true (**Android:** `dumpsys window`; **Harmony:** `uitest dumpLayout` bundle grep) |
+| `get_app_version()` | Platform-specific app + device metadata written to `meta_info.json` at exploration start (**Harmony:** parses `bm dump -n` for version and entry ability) |
 | `click(x, y)` | Tap at device pixels |
 | `swipe(x1, y1, x2, y2, duration_ms=500)` | Swipe gesture |
 | `type_text(text)` | Type text into focused field |
@@ -762,7 +814,7 @@ if is_keyboard_open():
 | Platform | `is_keyboard_open()` signal |
 |----------|-----------------------------|
 | **Android** | Primary: `adb shell dumpsys input_method` (`mInputShown=true`, `mShowIme=true`, or `mVisibleState=STATE_VISIBLE`). Fallback: IME package/class names in `get_xml_layout()`. |
-| **Harmony** | Heuristic on `uitest dumpLayout` XML (IME-related `package` / `class` substrings). No stable hdc IME flag in-tree. |
+| **Harmony** | Layered heuristics (no stable hdc IME flag like Android `dumpsys input_method`): (1) walk `uitest dumpLayout` JSON for visible IME-related `bundleName` / class; (2) optional `hidumper -s WindowManagerService`; (3) fallback IME `package` / `class` substrings in normalized `get_xml_layout()` XML. |
 
 Call **`is_keyboard_open()`** directly if you need to branch without taking a screenshot. Most code paths should rely on **`take_screenshot()`** so graph screenshots, CLIP, and VLM inputs stay keyboard-free by default.
 
@@ -790,7 +842,7 @@ for _ in range(5):
 
 close_application()          # force-stop appPackage (kill process)
 wait()
-run_application()            # cold launch (Android: launcher intent if use_launcher_intent or $ in appActivity)
+run_application()            # cold launch (Android: launcher intent if use_launcher_intent or $ in appActivity; Harmony: aa start -a appActivity -b appPackage)
 wait()
 
 # scroll content toward top (one swipe: center → downward finger, direction "up")
@@ -869,22 +921,30 @@ XML from Android is native uiautomator hierarchy — no conversion needed.
 
 ### `HarmonyDriver`
 
-Uses **`hdc -t {device_id}`** and **uitest** commands.
+Uses **`hdc -t {device_id}`** and **uitest** commands (no adb / no hmdriver2 dependency in-tree).
 
 | Method | Implementation |
 |--------|----------------|
-| `take_screenshot()` | If `is_keyboard_open()` → `back()`; then `snapshot_display` → `hdc file recv` → OpenCV read |
-| `is_keyboard_open()` | IME heuristics on normalized `dumpLayout` XML |
+| `take_screenshot()` | If `is_keyboard_open()` → `back()`; then `snapshot_display -f` → `hdc file recv` → OpenCV read |
+| `is_keyboard_open()` | Layered IME detection: uitest JSON hierarchy walk → `hidumper` WindowManagerService → normalized `dumpLayout` XML fallback (see [Soft keyboard](#soft-keyboard-is_keyboard_open)) |
 | `get_xml_layout()` | `uitest dumpLayout` → read file; normalize to Android-style XML if JSON |
+| `get_foreground_package()` | `uitest dumpLayout` → grep first non-system `bundleName` (excludes `com.ohos.sceneboard`, `com.ohos.systemui`, `com.ohos.launcher`); used by Walker when `skip_exploration_for_no_app_package` is true |
 | `get_current_app_id()` | Parse `aa dump -a` for `bundleName` |
+| `get_app_version()` | `bm dump -n {appPackage}` → parse `versionName`, `versionCode`, `mainElementName`, `mainAbility`, module list; returns `entry.launch_command` helper for preflight |
 | `click()` | `uitest uiInput click x y` |
 | `swipe()` | `uitest uiInput swipe x1 y1 x2 y2 duration_ms` |
 | `type_text()` | `uitest uiInput text …` |
 | `back()` | `uitest uiInput keyEvent back` |
 | `home()` | `uitest uiInput keyEvent home` |
-| `run_application()` | `hdc shell am start -W {appPackage}/{appActivity}` |
+| `run_application()` | `hdc shell aa start -a {appActivity} -b {appPackage}` (`appActivity` = entry ability / `mainElementName`; defaults to `EntryAbility` if omitted) |
 | `close_application()` | `hdc shell aa force-stop {appPackage}` |
 | `get_screen_size()` | `hidumper` DisplayManagerService (fallback `1080×2400`) |
+
+**Preflight (Harmony):** Before a long run, always verify on device:
+
+1. **`close_application()`** — app process is gone (`aa force-stop`).
+2. **`run_application()`** — app cold-starts into the correct ability (fix `appActivity` via [resolve entry ability](#resolve-apppackage-and-appactivity-harmony) if wrong screen).
+3. **`get_foreground_package()`** — returns `appPackage` on the start screen and several in-app tabs/screens.
 
 **XML normalization:** Harmony `uitest dumpLayout` may return raw XML or a JSON tree. `HarmonyDriver.get_xml_layout()`:
 
@@ -1423,7 +1483,7 @@ if self.configs.driver.skip_exploration_for_no_app_package:
 
 Early breaks also set `walk_completed = False` when no action is selected (empty node, CLIP failure, etc.).
 
-On **Android**, `AndroidDriver.get_foreground_package()` parses `adb shell dumpsys window` (`mCurrentFocus` / `mFocusedApp` / `topResumedActivity`) for the foreground package name. That value is compared to `configs.driver.appPackage` (e.g. `com.google.android.deskclock` for Clock). **`local_bfs`** and **`llm_based_bfs`** also check foreground package before the branch loop and may return early without incrementing `num_walks` if the app is wrong — see [Before you run](#before-you-run-run_exploresh-or-explorepy).
+On **Android**, `AndroidDriver.get_foreground_package()` parses `adb shell dumpsys window` (`mCurrentFocus` / `mFocusedApp` / `topResumedActivity`) for the foreground package name. On **Harmony**, `HarmonyDriver.get_foreground_package()` reads the first non-system `bundleName` from `uitest dumpLayout`. That value is compared to `configs.driver.appPackage` (e.g. `com.google.android.deskclock` for Clock, `com.huawei.hmos.clock` for Harmony Clock). **`local_bfs`** and **`llm_based_bfs`** also check foreground package before the branch loop and may return early without incrementing `num_walks` if the app is wrong — see [Before you run](#before-you-run-run_exploresh-or-explorepy).
 
 **Typical packages that trigger an early stop** (device-dependent):
 
@@ -1437,7 +1497,7 @@ On **Android**, `AndroidDriver.get_foreground_package()` parses `adb shell dumps
 
 - The check runs **after** the action that left the app; the walk may already have resolved one screen in the foreign app before stopping.
 - Early `break` skips the post-loop landing resolve for that walk (same as other early exits).
-- `get_foreground_package()` is implemented on **`AndroidDriver`**; enable this flag for Android configs where that method exists.
+- `get_foreground_package()` is implemented on **`AndroidDriver`** and **`HarmonyDriver`**; enable this flag when those methods return the correct `appPackage` on your target screens (verify with [preflight](#preflight-reset_to_start_page-must-work-on-the-device)).
 
 **Edges:** action `a_k` is materialized when screen `s_(k+1)` is resolved — either at the start of the next loop iteration or in the post-loop landing pass. Deduped in `AppGraph.add_edge`.
 
@@ -1792,7 +1852,7 @@ If the agent keeps conversation state:
 | `Driver/factory.py` | `build_driver(settings, agent)` |
 | `Driver/BaseDriver.py` | Shared `execute_action`, `close_application`, `reset_to_start_page`; abstract `is_keyboard_open()` |
 | `Driver/Android_Driver.py` | adb; `is_keyboard_open` + keyboard-dismiss in `take_screenshot`; `close_application` → `am force-stop`; MAIN/LAUNCHER launch when `use_launcher_intent` or `$` in `appActivity` |
-| `Driver/HarmonyOS_Driver.py` | hdc + uitest; `is_keyboard_open` (XML) + keyboard-dismiss in `take_screenshot`; `close_application` → `aa force-stop` |
+| `Driver/HarmonyOS_Driver.py` | hdc + uitest; `get_foreground_package`, `get_app_version` (`bm dump`); layered `is_keyboard_open`; `run_application` → `aa start`; `close_application` → `aa force-stop` |
 | `Driver.py` | Legacy unified driver (reference implementation) |
 | `Debugger.py` | Pretty-prints agent results and timing |
 

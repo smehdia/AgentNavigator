@@ -18,4 +18,8 @@ temp_*
 */temp_*
 **/*/temp_*
 **/**/*/temp_*
-
+./explored_apps/*.jpeg
+**/explored_apps/*.jpeg
+*/explored_apps/*.jpeg
+**/*/explored_apps/*.jpeg
+**/**/*/explored_apps/*.jpeg
