@@ -9,7 +9,7 @@ import cv2
 import networkx as nx
 
 from Graph.AppGraph import AppGraph
-from Graph.Where_Am_I_Global import WhereAmI_Global
+from Graph.Global_Localization import Global_Localization
 from ImageUtils import ImageUtils
 from Debugger import Debugger
 from Driver.BaseDriver import BaseDriver
@@ -20,14 +20,14 @@ from layout_distance import get_android_xml_structure_distance
 
 
 class BackTrack:
-    def __init__(self, app_graph: AppGraph, image_utils: ImageUtils, debugger: Debugger, driver: BaseDriver, agent: BaseAgent, vlm_client: VLM, where_am_i_global: WhereAmI_Global, configs: dict):
+    def __init__(self, app_graph: AppGraph, image_utils: ImageUtils, debugger: Debugger, driver: BaseDriver, agent: BaseAgent, vlm_client: VLM, global_localization: Global_Localization, configs: dict):
         self.app_graph = app_graph
         self.image_utils = image_utils
         self.debugger = debugger
         self.driver = driver
         self.agent = agent
         self.vlm_client = vlm_client
-        self.where_am_i_global = where_am_i_global
+        self.global_localization = global_localization
         self.configs = configs
 
 
@@ -130,7 +130,7 @@ class BackTrack:
             self.driver.execute_action(undo_action_standardized)
             current_screenshot = self.driver.get_non_loading_page()
             current_xml_layout = self.driver.get_xml_layout()
-            find_result = self.where_am_i_global.find_node(current_screenshot, current_xml_layout, self.configs, [current_node], [forward_action_element])
+            find_result = self.global_localization.find_node(current_screenshot, current_xml_layout, self.configs, [current_node], [forward_action_element])
             clip_similarity_dict = find_result["query_clip_similarity_dict"]
             xml_structure_distance_dict = find_result["query_xml_structure_distance_dict"]
             
@@ -263,7 +263,7 @@ class BackTrack:
         # After replaying the actions, check if we have arrived at the target node.
         current_screenshot = self.driver.get_non_loading_page()
         current_xml_layout = self.driver.get_xml_layout()
-        find_result = self.where_am_i_global.find_node(
+        find_result = self.global_localization.find_node(
             current_screenshot,
             current_xml_layout,
             self.configs,

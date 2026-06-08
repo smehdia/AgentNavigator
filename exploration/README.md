@@ -120,7 +120,7 @@ default:
 | | `exploration_modes.local_bfs.max_branching_factor` | Branches per BFS anchor |
 | | `exploration_modes.local_bfs.backtracking_*` | CLIP/XML gates for VLM undo vs agent replay |
 | | `exploration_modes.model_llm_bfs.*` | LLM node ranking for `llm_based_bfs` |
-| | `where_am_i_global.find_node_*` | Four-stage screen matcher thresholds |
+| | `global_localization.find_node_*` | Four-stage screen matcher thresholds |
 | | `action_matching_clip_similarity_threshold` | Live CLIP verify before tap |
 | **`logs`** | `root` | All outputs (graph, screenshots, `explore.log`) — **gitignored** as `explored_apps/` |
 | | `resume_from_checkpoint` | Load `app_graph.pkl` from `logs.root` if present |
@@ -366,7 +366,7 @@ flowchart TB
   ACT --> RES
 ```
 
-### Screen matching (`WhereAmI_Global.find_node`)
+### Screen matching (`Global_Localization.find_node`)
 
 On every screenshot, the matcher tries four stages in order:
 
@@ -438,7 +438,7 @@ Graph/
 ├── BackTrack.py            # contextual undo (VLM), agent path replay, shortest-path actions
 ├── Node.py                 # screen node: VLM elements, embeddings, refresh
 ├── Walker.py               # resolve_current_screen, action policies (CLIP verify), save_debug_path, random_walk (walk_completed), local_bfs, llm_based_bfs
-└── Where_Am_I_Global.py    # four-stage “where am I?” matcher
+└── Global_Localization.py    # four-stage “where am I?” matcher
 
 explore.py                  # CLI entry: --config, exploration loop, logs_num_walks_nodes, plot_nodes_vs_walk → num_nodes_vs_walk.png
 run_explore.sh              # optional wrapper: tee console log to logs.root/explore.log
@@ -906,7 +906,7 @@ else:
     vlm_client = VLM(configs, dbg)
 ```
 
-Both classes expose the **same methods** (`extract_elements_from_page`, `extract_page_summary`, `guess_undo_action`, `prioritize_node_for_bfs`, `compare_navigtional_purpose`, `extract_text_embedding`, …). Walker, `Node`, `Where_Am_I_Global`, and `BackTrack` only depend on that interface.
+Both classes expose the **same methods** (`extract_elements_from_page`, `extract_page_summary`, `guess_undo_action`, `prioritize_node_for_bfs`, `compare_navigtional_purpose`, `extract_text_embedding`, …). Walker, `Node`, `Global_Localization`, and `BackTrack` only depend on that interface.
 
 ### Config (`vlm` in YAML)
 
@@ -942,7 +942,7 @@ vlm:
 | `model_name_for_page_summary` | both | Model id for page summary / stage-4 `find_node` |
 | `screenshot_longest_side_*` / `jpeg_quality_*` | both | Image resize before VLM (same helpers as `VLM.py`) |
 
-Graph-level model names (`exploration_modes.local_bfs.guess_undo_vlm_type`, `model_llm_bfs.model_name`, `where_am_i_global...compare_navigational_purpose_model`) are unchanged; they are sent to whichever backend `use_yibu_api` selects.
+Graph-level model names (`exploration_modes.local_bfs.guess_undo_vlm_type`, `model_llm_bfs.model_name`, `global_localization...compare_navigational_purpose_model`) are unchanged; they are sent to whichever backend `use_yibu_api` selects.
 
 **Legacy note:** Older configs used a single `vlm.api_key`. New configs should use `alibaba_api_key` + `yibu_api_key`. If you still have only `api_key`, set `alibaba_api_key` to that value for DashScope.
 
@@ -950,7 +950,7 @@ Graph-level model names (`exploration_modes.local_bfs.guess_undo_vlm_type`, `mod
 
 - File: `VLM.py`
 - Multimodal: `dashscope.MultiModalConversation` (international endpoint by default)
-- Embeddings: `dashscope.TextEmbedding` (`text-embedding-v4`) for page-purpose matching in `Where_Am_I_Global`
+- Embeddings: `dashscope.TextEmbedding` (`text-embedding-v4`) for page-purpose matching in `Global_Localization`
 - Set `use_yibu_api: false` and provide a valid `alibaba_api_key`
 
 ### `VLM_Yibu` (一步API / yibuapi.com)
@@ -1069,10 +1069,10 @@ Graph-related config (`configs/*.yaml` → `graph` / `logs`):
 | `max_consecutive_exploration_actions_in_each_iteration` | Fallback max actions per walk if schedule is not used |
 | `logs.root` | Output directory for graph, screenshots, `meta_info.json`, `explore.log` (via shell wrapper) |
 | `logs.resume_from_checkpoint` | If true and `app_graph.pkl` exists under `logs.root`, load it; else create new graph |
-| `where_am_i_global.find_node_visual_emphasize.*` | `find_node` stage 1: high CLIP + XML gate (global, no path filter) |
-| `where_am_i_global.find_node_structure_emphasize.*` | `find_node` stage 2: lower CLIP + tighter XML; sibling exclusion; higher CLIP after scroll/swipe |
-| `where_am_i_global.find_node_path_emphasize.*` | `find_node` stage 3: action-sequence match from roots + moderate CLIP/XML (see [WhereAmI_Global](#wheream_i_global-graphwhere_am_i_globalpy)) |
-| `where_am_i_global.find_node_page_purpose_emphasize.*` | `find_node` stage 4: page-purpose embedding pre-filter + VLM navigational-purpose judge (`page_purpose_similarity_threshold`, `max_num_candidates_for_comparison`, `compare_navigational_purpose_model`) |
+| `global_localization.find_node_visual_emphasize.*` | `find_node` stage 1: high CLIP + XML gate (global, no path filter) |
+| `global_localization.find_node_structure_emphasize.*` | `find_node` stage 2: lower CLIP + tighter XML; sibling exclusion; higher CLIP after scroll/swipe |
+| `global_localization.find_node_path_emphasize.*` | `find_node` stage 3: action-sequence match from roots + moderate CLIP/XML (see [Global_Localization](#global_localization-graphglobal_localizationpy)) |
+| `global_localization.find_node_page_purpose_emphasize.*` | `find_node` stage 4: page-purpose embedding pre-filter + VLM navigational-purpose judge (`page_purpose_similarity_threshold`, `max_num_candidates_for_comparison`, `compare_navigational_purpose_model`) |
 | `action_matching_clip_similarity_threshold` | Min cosine similarity between stored element `clip_embedding` and a **live** crop at `boundingBox` before executing a tap-like action (see [Action selection policies](#action-selection-policies); skipped for `scroll` / `swipe`) |
 | `max_refresh_elements_on_each_node_visit` | Max VLM **refresh** runs per node (`num_refreshed_elements <` this value; e.g. `2` → at most 2 refreshes) |
 | `refresh_elements_after_at_least_nodes_for_k_times` | Start refreshing only when `num_visits >=` this value (e.g. `5` → from 5th resolve onward) |
@@ -1198,7 +1198,7 @@ Re-runs VLM element extraction on revisit and **appends only new** elements (sam
 - Updates `canonical_page_layout`
 - Returns count of elements added
 
-### `WhereAmI_Global` (`Graph/Where_Am_I_Global.py`)
+### `Global_Localization` (`Graph/Global_Localization.py`)
 
 Answers **“have we seen this screen before?”** using a **four-stage** matcher over all known nodes, plus **transition-aware** filters so different actions from the same parent (e.g. Home → Haul vs Home → Rufus) are not collapsed when XML distance is ~0.
 
@@ -1266,7 +1266,7 @@ Implementation: `find_node_page_purpose_emphasize(..., path_node_history)` sets 
 
 ### `Walker` (`Graph/Walker.py`)
 
-Orchestrates exploration. Holds `WhereAmI_Global`, `BackTrack`, `walk_counter` (debug strip index), and references `app_graph`, `driver`, `vlm_client`, `agent`.
+Orchestrates exploration. Holds `Global_Localization`, `BackTrack`, `walk_counter` (debug strip index), and references `app_graph`, `driver`, `vlm_client`, `agent`.
 
 The walk is modeled as a **state–action trajectory**: `s0 → a0 → s1 → a1 → … → a(N-1) → sN`.  
 `max_num_actions = N` means **N executed actions** and **N+1 resolved screens** when the walk completes without early exit.
@@ -1275,7 +1275,7 @@ The walk is modeled as a **state–action trajectory**: `s0 → a0 → s1 → a1
 
 Shared resolver used on every screen capture:
 
-1. `where_am_i_global.find_node(..., include_path_emphasize=include_path_emphasize)` — match existing node or create a new `Node` (VLM element extraction on create; optional `page_summary_payload` from `find_node` stage 4 avoids re-calling page summary).
+1. `global_localization.find_node(..., include_path_emphasize=include_path_emphasize)` — match existing node or create a new `Node` (VLM element extraction on create; optional `page_summary_payload` from `find_node` stage 4 avoids re-calling page summary).
 2. **Revisit** (`node_id` found):
    - `num_visits += 1`
    - **Conditional refresh** — both must hold:
@@ -1485,7 +1485,7 @@ Convention: image `i` is **state at node i**; action `i` is the **outgoing** edg
 
 ### `BackTrack` (`Graph/BackTrack.py`)
 
-Used by **`Walker.local_bfs`** and **`Walker.llm_based_bfs`** for two-stage return to the BFS anchor. Constructed in `Walker.__init__` with `vlm_client`, `where_am_i_global`, `driver`, and `agent`.
+Used by **`Walker.local_bfs`** and **`Walker.llm_based_bfs`** for two-stage return to the BFS anchor. Constructed in `Walker.__init__` with `vlm_client`, `global_localization`, `driver`, and `agent`.
 
 | Method | Role |
 |--------|------|
@@ -1529,13 +1529,13 @@ def get_back_to_previous_node(
    - Reuse `current_node.backtracking_action` if set (`ParsedAction` or dict from JSON → converted via `parsed_action_from_dict`).
    - Else `VLM.guess_undo_action(screenshot, parent_screenshot, forward_action_element)` (nav tab, scroll up, swipe right, collapse menu, subtab, back, or none).
 4. If no undo → `False`.
-5. `driver.execute_action(undo)`; capture screen + XML; `where_am_i_global.find_node`.
+5. `driver.execute_action(undo)`; capture screen + XML; `global_localization.find_node`.
 6. Verify (undo thresholds): `clip[parent] >= backtracking_with_undo_clip_similarity_threshold` and `xml_dist[parent] <= backtracking_with_undo_xml_structure_distance_threshold`.
 7. On success: cache undo on `current_node.backtracking_action`; on failure: clear cache.
 
 **Undo verify config** (`exploration_modes.local_bfs`, e.g. Clock): CLIP ≥ **0.7**, XML ≤ **0.2**.
 
-**Note:** `find_node` may log “Found node (structure_emphasize) …” under **matcher** thresholds (`where_am_i_global`, e.g. CLIP ≥ 0.6). Undo verify uses **`backtracking_with_undo_*`** on the **parent** id — separate from matcher and from agent replay thresholds.
+**Note:** `find_node` may log “Found node (structure_emphasize) …” under **matcher** thresholds (`global_localization`, e.g. CLIP ≥ 0.6). Undo verify uses **`backtracking_with_undo_*`** on the **parent** id — separate from matcher and from agent replay thresholds.
 
 #### `backtrack_using_agent` (stage 2)
 
@@ -1574,7 +1574,7 @@ These thresholds are **looser than stage-1 undo** on purpose:
 | Stage 1 — VLM undo landed on parent | `backtracking_with_undo_clip_similarity_threshold`, `backtracking_with_undo_xml_structure_distance_threshold` | Clock: 0.7 / 0.2 |
 | Stage 2 — agent replay landed on anchor | `backtracking_clip_similarity_threshold_with_agent`, `backtracking_xml_structure_distance_threshold_with_agent` | Clock: 0.5 / 0.3; YouTube: 0.1 / 0.5 |
 
-Both stages call `where_am_i_global.find_node` only to obtain `query_clip_similarity_dict` / `query_xml_structure_distance_dict`; the numeric gates above decide success, not `find_node`’s visual/structure/path/page-purpose stages.
+Both stages call `global_localization.find_node` only to obtain `query_clip_similarity_dict` / `query_xml_structure_distance_dict`; the numeric gates above decide success, not `find_node`’s visual/structure/path/page-purpose stages.
 
 Returns `False` if path is empty, grounding fails, or verify fails.
 
@@ -1787,7 +1787,7 @@ If the agent keeps conversation state:
 | `VLM_Yibu.py` | Yibu VLM (same API surface); multimodal via yibuapi; embeddings via DashScope (`alibaba_api_key`) |
 | `test_yibu.py` | Standalone Yibu chat / `extract_elements_from_page` test and visualization |
 | `api_logger/` | `local_api_logger` — local JSONL token/call logs (`api_logs/`) when using `VLM_Yibu` |
-| `Graph/Where_Am_I_Global.py` | Four-stage `find_node` (visual / structure / path / page-purpose), sibling exclusion, `get_shortest_path_from_roots` |
+| `Graph/Global_Localization.py` | Four-stage `find_node` (visual / structure / path / page-purpose), sibling exclusion, `get_shortest_path_from_roots` |
 | `ImageUtils.py` | CLIP model, screenshot embeddings |
 | `Driver/factory.py` | `build_driver(settings, agent)` |
 | `Driver/BaseDriver.py` | Shared `execute_action`, `close_application`, `reset_to_start_page`; abstract `is_keyboard_open()` |

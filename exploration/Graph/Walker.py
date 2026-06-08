@@ -11,7 +11,7 @@ from Driver.BaseDriver import BaseDriver
 from VLM import VLM
 from Agents.BaseAgent import BaseAgent
 
-from Graph.Where_Am_I_Global import WhereAmI_Global
+from Graph.Global_Localization import Global_Localization
 from Graph.Node import Node
 from Agents.MAI_UI.MAI_UI import ParsedAction
 from sklearn.metrics.pairwise import cosine_similarity
@@ -25,10 +25,10 @@ class Walker:
         self.driver = driver
         self.vlm_client = vlm_client
         self.agent = agent
-        self.where_am_i_global = WhereAmI_Global(app_graph, image_utils, vlm_client, debugger, configs)
+        self.global_localization = Global_Localization(app_graph, image_utils, vlm_client, debugger, configs)
         self.configs = configs
         self.walk_counter = walk_counter
-        self.backtracker = BackTrack(app_graph, image_utils, debugger, driver, agent, vlm_client, self.where_am_i_global, configs)
+        self.backtracker = BackTrack(app_graph, image_utils, debugger, driver, agent, vlm_client, self.global_localization, configs)
 
     @staticmethod
     def ui_element_to_parsed_action(ui_element: dict) -> ParsedAction:
@@ -56,7 +56,7 @@ class Walker:
 
     def resolve_current_screen(self, screenshot, xml_layout, path_node_history, path_action_history, include_path_emphasize=True):
         with self.debugger.time_block("Find node in the graph", color="gray"):
-            find_node_result = self.where_am_i_global.find_node(screenshot, xml_layout, self.configs, path_node_history, path_action_history, include_path_emphasize)
+            find_node_result = self.global_localization.find_node(screenshot, xml_layout, self.configs, path_node_history, path_action_history, include_path_emphasize)
             node_id = find_node_result["node_id"]
             page_summary_payload = find_node_result.get("page_summary_payload", None)
 

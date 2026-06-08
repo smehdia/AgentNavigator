@@ -84,7 +84,7 @@ default:
     max_refresh_elements_on_each_node_visit: 2   # add elements to node if we visit it more than this number of times
     refresh_elements_after_at_least_nodes_for_k_times: 5  # this excludes visites in BFS mode and backtracking
 
-    where_am_i_global:
+    global_localization:
       # this is high similarity fast method to find matched node (very fast, high confidence, high false negatives)
       find_node_visual_emphasize:
         clip_embedding_similarity_threshold: 0.99

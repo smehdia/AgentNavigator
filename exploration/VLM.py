@@ -1165,7 +1165,7 @@ class VLM:
         )
 
         response = dashscope.MultiModalConversation.call(
-            model=self.configs.graph.where_am_i_global.find_node_page_purpose_emphasize.compare_navigational_purpose_model,
+            model=self.configs.graph.global_localization.find_node_page_purpose_emphasize.compare_navigational_purpose_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -1203,7 +1203,7 @@ class VLM:
             result["matched_node_id"] = None
             result["same_purpose"] = False
 
-        conf_thresh = self.configs.graph.where_am_i_global.find_node_page_purpose_emphasize.page_purpose_similarity_threshold
+        conf_thresh = self.configs.graph.global_localization.find_node_page_purpose_emphasize.page_purpose_similarity_threshold
         if float(result.get("confidence", 0.0)) < conf_thresh:
             result["matched_node_id"] = None
             result["same_purpose"] = False

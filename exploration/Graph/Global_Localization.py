@@ -12,7 +12,7 @@ from VLM import VLM
 from layout_distance import get_android_xml_structure_distance
 
 
-class WhereAmI_Global:
+class Global_Localization:
     def __init__(self, app_graph: AppGraph, image_utils: ImageUtils, vlm_client: VLM, debugger: Debugger, configs: dict):
         self.app_graph = app_graph
         self.image_utils = image_utils
@@ -231,7 +231,7 @@ class WhereAmI_Global:
         query_page_summary_payload: dict,
         path_action_history: list[dict], path_node_history: list[Node]
     ) -> tuple[str | None, dict]:
-        cfg = self.configs.graph.where_am_i_global.find_node_page_purpose_emphasize
+        cfg = self.configs.graph.global_localization.find_node_page_purpose_emphasize
         sim_thresh = cfg.page_purpose_similarity_threshold
         max_k = cfg.max_num_candidates_for_comparison
 
@@ -291,8 +291,8 @@ class WhereAmI_Global:
         query_xml_structure_distance_dict = self.get_xml_structure_distance_with_all_nodes(query_xml_layout)
         
         with self.debugger.time_block("Find node visual emphasize", color="gray"):
-            cthresh = configs.graph.where_am_i_global.find_node_visual_emphasize.clip_embedding_similarity_threshold
-            xthresh = configs.graph.where_am_i_global.find_node_visual_emphasize.xml_distance_threshold
+            cthresh = configs.graph.global_localization.find_node_visual_emphasize.clip_embedding_similarity_threshold
+            xthresh = configs.graph.global_localization.find_node_visual_emphasize.xml_distance_threshold
             node_id, similarity = self.find_node_visual_emphasize(query_clip_similarity_dict, query_xml_structure_distance_dict, cthresh, xthresh)
             if node_id is not None:
                 self.debugger.log(f"Found node (visual_emphasize) {node_id} with similarity {similarity}", color="green")
@@ -306,10 +306,10 @@ class WhereAmI_Global:
         else:
             exclusion_list = []
         # in second stage we use structure similarity if the last action is swipe or scroll we use higher clip similarity threshold
-        cthresh = configs.graph.where_am_i_global.find_node_structure_emphasize.clip_embedding_similarity_threshold
-        xthresh = configs.graph.where_am_i_global.find_node_structure_emphasize.xml_distance_threshold
+        cthresh = configs.graph.global_localization.find_node_structure_emphasize.clip_embedding_similarity_threshold
+        xthresh = configs.graph.global_localization.find_node_structure_emphasize.xml_distance_threshold
         if path_action_history and (path_action_history[-1]['type'] in ('swipe', 'scroll')):
-            cthresh = configs.graph.where_am_i_global.find_node_structure_emphasize.clip_similarity_threshold_if_previous_action_is_swipe_or_scroll
+            cthresh = configs.graph.global_localization.find_node_structure_emphasize.clip_similarity_threshold_if_previous_action_is_swipe_or_scroll
            
 
         with self.debugger.time_block("Find node structure emphasize", color="gray"):
@@ -320,8 +320,8 @@ class WhereAmI_Global:
 
         if include_path_emphasize:
             with self.debugger.time_block("Find node path emphasize", color="cyan"):
-                pthresh = configs.graph.where_am_i_global.find_node_path_emphasize.clip_embedding_similarity_threshold
-                pxthresh = configs.graph.where_am_i_global.find_node_path_emphasize.xml_distance_threshold
+                pthresh = configs.graph.global_localization.find_node_path_emphasize.clip_embedding_similarity_threshold
+                pxthresh = configs.graph.global_localization.find_node_path_emphasize.xml_distance_threshold
                 node_id, similarity = self.find_node_path_emphasize(
                     query_clip_similarity_dict,
                     query_xml_structure_distance_dict,
