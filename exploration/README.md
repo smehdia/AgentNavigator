@@ -17,12 +17,14 @@ Follow these steps before a long run. Skipping device checks is the most common 
 
 > **Critical:** Every `random_walk`, BFS approach, and agent backtrack starts from **`driver.reset_to_start_page()`** (5× back → **force-stop** app → relaunch → **scroll to top** → optional agent steps). If reset does not open the **correct app** and land on a **stable start screen**, exploration will graph the wrong UI or stop immediately. **Always verify `reset_to_start_page()` end-to-end on the device** before a long `exploration_walks` run.
 
+> **Highly recommended:** After editing your YAML (especially `driver.appPackage`, `driver.appActivity`, `driver.use_launcher_intent`, and `driver.reset_instruction`), run **`check_driver.py`** on the physical device **before** `explore.py`. It interactively checks launch, reset, and foreground detection — see [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy).
+
 ### 1) Verify the driver — especially `reset_to_start_page()`
 
 | Setting | YAML keys | What you must get right |
 |---------|-----------|-------------------------|
 | **App identity** | `driver.appPackage`, `driver.appActivity` | `appPackage` must match the installed app. **Android:** `appActivity` is the launcher activity (see [resolve activity](#resolve-apppackage-and-appactivity-android)). **Harmony:** `appActivity` is the **entry ability** / `mainElementName` from `bm dump` (see [resolve entry ability](#resolve-apppackage-and-appactivity-harmony)). |
-| **Launcher launch** | `driver.use_launcher_intent` or `$` in `appActivity` | **Android only.** Some apps (e.g. YouTube `Shell$HomeActivity`) break `am start -n pkg/activity` through `adb shell` because `$` is stripped. Set `use_launcher_intent: true` or use an activity name containing `$` (auto-detected on Android). |
+| **Launcher launch** | `driver.use_launcher_intent` or `$` in `appActivity` | **Android only.** Some apps break `am start -n pkg/activity`: YouTube (`$` stripped by shell), Outlook (foreground activity ≠ launchable component — e.g. `CentralActivity` from `topResumedActivity` fails but MAIN/LAUNCHER works). Set **`use_launcher_intent: true`** in YAML when component launch fails. Auto-enabled when `appActivity` contains `$`. |
 | **Force-close + relaunch** | `close_application()` (in reset) | **`am force-stop` / `aa force-stop`** on `appPackage` kills the process (avoids YouTube-style “minimized in Recents” after Back only). Then `run_application()` cold-starts the app. **Always verify both methods on the device** before a long run (see checklist below). |
 | **Scroll to top** | (in reset, after launch) | One centered **scroll up** swipe (~35% screen height) so feeds/lists start near the top before the agent loop. |
 | **Reset instruction** | `driver.reset_instruction` | **Required for reliable exploration.** Natural-language goal for the agent loop **after** force-stop, launch, and scroll-up. The agent must reach your canonical tab/screen and return **`finished`**. Without this, reset only relaunches the app and may leave you on the wrong tab, splash, or a dialog. |
@@ -35,7 +37,7 @@ adb -s YOUR_DEVICE_ID shell cmd package resolve-activity --brief YOUR.PACKAGE | 
 # Example: com.google.android.youtube/.app.honeycomb.Shell$HomeActivity
 ```
 
-Put **`appPackage`** = package name. Put **`appActivity`** = part after `/` (e.g. `.app.honeycomb.Shell$HomeActivity` or full class). If manual `am start -n` fails with **Error type 3** and the intent shows `Shell` without `$HomeActivity`, use **`use_launcher_intent: true`** in YAML (see [AndroidDriver `run_application()`](#androiddriver)).
+Put **`appPackage`** = package name. Put **`appActivity`** = part after `/` (e.g. `.app.honeycomb.Shell$HomeActivity` or full class). **`appActivity` from `topResumedActivity` is not always launchable** — if `am start -n pkg/activity` fails (Error type 3 / activity not found) but MAIN/LAUNCHER works, set **`use_launcher_intent: true`** in YAML (see `configs/outlook_android.yaml`, `configs/youtube_android.yaml`, and [AndroidDriver `run_application()`](#androiddriver)).
 
 Test launch:
 
@@ -75,12 +77,38 @@ Test force-stop (same as `close_application()`):
 hdc -t YOUR_DEVICE_ID shell aa force-stop YOUR.PACKAGE
 ```
 
+#### Driver preflight (`check_driver.py`)
+
+**Run this before `explore.py`** whenever you add a new app config or change driver settings.
+
+From `refactored/exploration/`:
+
+```bash
+python check_driver.py --config configs/your_app.yaml
+```
+
+Interactive steps:
+
+| Step | What it tests |
+|------|----------------|
+| 1 | `run_application()` — cold launch |
+| 2 | `reset_to_start_page()` — force-stop, relaunch, scroll-up, agent `reset_instruction` (verbose MAI-UI debug via `Debugger`) |
+| 3 | Loop — you navigate on device; script prints `get_foreground_package()` vs `appPackage` |
+
+**Before step 1**, confirm launch in your YAML:
+
+1. Test component launch: `adb shell am start -W PACKAGE/ACTIVITY`
+2. If that fails, test launcher: `adb shell am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -p PACKAGE`
+3. If only launcher works, add **`use_launcher_intent: true`** under `driver:` in your config (required for Outlook and YouTube-style apps).
+
+Also set a working **`reset_instruction`** before step 2 — the agent must reach your exploration anchor screen and terminate with success.
+
 #### Preflight: `reset_to_start_page()` must work on the device
 
-Watch the phone while you run this (not only assert in Python):
+Watch the phone while you run `check_driver.py` (or the snippet below):
 
 ```python
-# From refactored/exploration/
+# From refactored/exploration/ — prefer check_driver.py for interactive checks
 from dynaconf import Dynaconf
 from Agents.factory import build_agent
 from Driver.factory import build_driver
@@ -111,6 +139,7 @@ hdc -t YOUR_DEVICE_ID shell aa start -a YOUR_ABILITY -b YOUR.PACKAGE
 
 **Checklist before a long run:**
 
+0. **`check_driver.py --config configs/your_app.yaml`** — launch, reset, and foreground checks pass; **`use_launcher_intent: true`** set when component `am start -n` fails on device.
 1. **`reset_to_start_page()`** fully kills and relaunches the app (not left in Recents), scrolls toward the top, then leaves the app on the intended start screen (agent returned `finished` if `reset_instruction` is set).
 2. **`close_application()`** then **`run_application()`** — watch the device: the app must **fully exit** after force-stop and **cold-start** into the target app (not stay in Recents / wrong ability).
 3. **`get_foreground_package()`** == `appPackage` on the start screen and on **2–3 other in-app pages** you care about (tabs, settings, sheets). If this fails on Harmony, fix `appActivity` (entry ability) or the `uitest dumpLayout` grep path before enabling `skip_exploration_for_no_app_package`.
@@ -172,7 +201,11 @@ default:
 
 Full key reference: [Graph exploration → config tables](#graph-exploration), [Post-processing config](#post-processing-config-post_process-in-yaml).
 
+**Launcher intent:** When creating a new config, test `am start -n` vs MAIN/LAUNCHER on the device (see [Driver preflight](#driver-preflight-check_driverpy)). If only launcher works, add `use_launcher_intent: true` under `driver:` before running `check_driver.py`.
+
 ### 3) Run exploration (colored logs)
+
+**Prerequisite:** [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy) should pass on the device for this config.
 
 From `refactored/exploration/`. **`CONFIG` must be set** — `run_explore.sh` uses the `CONFIG` environment variable (no default app).
 
@@ -409,7 +442,7 @@ Image size/quality keys apply **only** to `get_node_user_intents`. `get_node_nav
 
 ### Preparing an app for inference (checklist)
 
-1. **Device + config** — [Verify driver and reset](#1-verify-the-driver--especially-reset_to_start_page), create YAML with `driver`, `agent`, `vlm`, `graph`, `logs`, `post_process`.
+1. **Device + config** — create YAML with `driver`, `agent`, `vlm`, `graph`, `logs`, `post_process`; set **`use_launcher_intent: true`** when needed; run [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy).
 2. **Explore** — `CONFIG=configs/your_app.yaml ./run_explore.sh` until the graph is large enough.
 3. **Confirm artifacts** — under `logs.root`: `graph.json`, `screenshots/*.jpg`, `app_graph.pkl`.
 4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → `node_intents.json` (Stage 1 VLM + Stage 2 BGE-M3).
@@ -513,6 +546,7 @@ Graph/
 └── Global_Localization.py    # four-stage “where am I?” matcher
 
 explore.py                  # CLI entry: --config, exploration loop, logs_num_walks_nodes, plot_nodes_vs_walk → num_nodes_vs_walk.png
+check_driver.py             # interactive driver preflight: launch, reset_to_start_page, foreground loop
 run_explore.sh              # optional wrapper: tee console log to logs.root/explore.log
 post_process.py             # CLI: Stage 1 VLM intents + nav plans; Stage 2 BGE-M3 embeddings → node_intents.json
 run_post_process.sh         # wrapper: tee console log to logs.root/post_process.log
@@ -1864,6 +1898,7 @@ If the agent keeps conversation state:
 | File | Role |
 |------|------|
 | `explore.py` | CLI (`--config`), `VLM` vs `VLM_Yibu` from `vlm.use_yibu_api`, schedule depth, mode selection, `load_or_create_app_graph`, resume, per-walk export, `plot_nodes_vs_walk` / `num_nodes_vs_walk.png` |
+| `check_driver.py` | Interactive driver preflight (`--config`): `run_application`, `reset_to_start_page`, foreground loop — run before `explore.py`; verify `use_launcher_intent` when `am start -n` fails — see [Driver preflight](#driver-preflight-check_driverpy) |
 | `run_explore.sh` | Run `explore.py` with `CONFIG=...`; tee log to `{logs.root}/explore.log` — see [How to run](#how-to-run) |
 | `post_process.py` | Stage 1: VLM `get_node_user_intents` (primary path) + `get_node_navigation_plans` (all roots, parallel); Stage 2: BGE-M3 node embeddings → `node_intents.json` |
 | `run_post_process.sh` | Run `post_process.py` with `CONFIG=...`; tee log to `{logs.root}/post_process.log` — see [Post-processing](#post-processing-post_processpy) |
