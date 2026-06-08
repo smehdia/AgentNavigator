@@ -5,7 +5,7 @@ Automated mobile app exploration: vision-language **agents** act on a device, a 
 **Inference preparation is a two-phase pipeline:**
 
 1. **Exploration** (`explore.py`) — grow `graph.json`, per-node screenshots, and `app_graph.pkl` under `logs.root`.
-2. **Post-processing** (`post_process.py`) — read that graph and produce **`node_intents.json`**: ranked **user intents** for retrieval (one multimodal VLM call per node) and **agent-friendly navigation memory** per root→node path (one text-only VLM call for all paths).
+2. **Post-processing** (`post_process.py`) — read that graph and produce **`node_intents.json`** in two stages: **Stage 1** generates ranked **user intents** (multimodal VLM on the primary root→node path) and **navigation plans** (`ui_navigation_memory`, one text-only plan per root); **Stage 2** embeds each node for retrieval with **BGE-M3** (`embedding` + `embedding_text`).
 
 You need a completed exploration run (same `logs.root` as in your YAML) before post-processing. Post-processing does not drive the device.
 
@@ -243,16 +243,27 @@ Detail: [Post-processing](#post-processing-post_processpy).
 
 ## Post-processing (`post_process.py`)
 
-Turns an explored **app graph** into structured intents and navigation plans for downstream agents (retrieval, UI-TARS-style replay, etc.).
+Turns an explored **app graph** into structured intents, navigation plans, and retrieval embeddings for downstream agents (intent matching, UI-TARS-style replay, etc.).
 
-Post-processing uses **two separate VLM calls per node**:
+`post_process.py` runs **two stages** sequentially when invoked from the CLI:
+
+| Stage | Function | Purpose |
+|-------|----------|---------|
+| **Stage 1** | `save_node_intents_and_navigation_plans` | VLM: **user intents** + **navigation plans** per node |
+| **Stage 2** | `add_node_embeddings_to_user_intents` | BGE-M3: one **node-level embedding** for retrieval |
+
+### Stage 1 — User intents and navigation plans (VLM)
+
+For each graph node, Stage 1 makes **two VLM calls in parallel** (`ThreadPoolExecutor`):
 
 | Call | Method | Input | Output |
 |------|--------|-------|--------|
-| **User intents** (multimodal) | `get_node_user_intents` | One visual path + outgoing edge descriptions | `user_intents` |
-| **Navigation plans** (text-only) | `get_node_navigation_plans` | All root paths as `page_summaries` + `actions` | `ui_navigation_memory` per root |
+| **User intents** (multimodal) | `get_node_user_intents` | **Primary** visual path + outgoing edge descriptions | `user_intents` |
+| **Navigation plans** (text-only) | `get_node_navigation_plans` | **All** root paths as `page_summaries` + `actions` | `ui_navigation_memory` per root |
 
 This split keeps intent generation grounded in the **final screenshot** (including active overlays) while route memory is generated cheaply from structured graph text for **every** root path in one batch.
+
+**Multiple roots:** Apps can have several `is_root: true` entry screens (e.g. different tabs). For each node, `build_paths_for_node` computes the shortest path from **every** root. Navigation plans cover **all** roots; user intents use only the **primary path** (fewest actions).
 
 ### Pipeline flow
 
@@ -262,29 +273,31 @@ flowchart TB
     G[graph.json]
     S[screenshots per node]
   end
-  subgraph per_node["For each graph node"]
-    P[build_paths_for_node]
-    R[Shortest path per root]
+  subgraph stage1["Stage 1 — intents & navigation plans (VLM)"]
+    P[build_paths_for_node — one path per root]
     PR[Pick primary path: fewest actions]
-    UI[get_node_user_intents — multimodal]
-    NP[get_node_navigation_plans — text only]
-    EMB[Embed user_intents]
+    UI[get_node_user_intents — multimodal, primary path]
+    NP[get_node_navigation_plans — text only, all roots]
+  end
+  subgraph stage2["Stage 2 — retrieval embeddings (BGE-M3)"]
+    ET[Build embedding_text: page_purpose + tabs + user_intents]
+    EMB[BGEM3FlagModel.encode — one vector per node]
   end
   subgraph out["Output"]
     J[node_intents.json]
   end
   G --> P
   S --> P
-  P --> R
-  R --> PR --> UI
-  R --> NP
-  UI --> EMB
+  P --> PR --> UI
+  P --> NP
   UI --> J
   NP --> J
-  EMB --> J
+  G --> ET
+  UI --> ET
+  ET --> EMB --> J
 ```
 
-**Step 1 — Collect paths.** For every node, find all **root** nodes (`is_root: true`). For each root, compute the **shortest node path** `root → … → node`. If the app has **N** roots, a node can have **N** path bundles.
+**Step 1 — Collect paths.** For every node, find all **root** nodes (`is_root: true`). For each root, compute the **shortest node path** `root → … → node`. If the app has **N** roots, a node has **N** path bundles.
 
 **Step 2 — Build path payload.** For each hop:
 
@@ -306,7 +319,20 @@ flowchart TB
 - Returns one **`ui_navigation_memory`** per root (`relevant_waypoint_sequence` + `transition_hints`).
 - **N roots ⇒ N navigation plans** for the same screen.
 
-**Step 6 — Intent embeddings.** Text embeddings (`ImageUtils.text_model_embedder`) are computed for deduplicated `user_intents` only (not for navigation memory).
+The two VLM calls in steps 4–5 are submitted together and run in parallel per node.
+
+### Stage 2 — Node embeddings for retrieval (BGE-M3)
+
+After Stage 1 writes `node_intents.json`, Stage 2 enriches it in place:
+
+1. Load `graph.json` and the Stage 1 output.
+2. For each node, build **`embedding_text`** from graph metadata plus Stage 1 intents:
+   - `page_purpose`, `active_tab`, `active_subtab` from `graph.json`
+   - `user_intents` from Stage 1
+3. Encode all nodes with **`BAAI/bge-m3`** (`FlagEmbedding.BGEM3FlagModel`), batched and L2-normalized for cosine similarity.
+4. Write back to `node_intents.json` with `embedding_text` and a single **`embedding`** vector per node.
+
+Navigation memory is **not** embedded — only the node-level intent text is used for retrieval.
 
 ### Output schema (`node_intents.json`)
 
@@ -323,16 +349,18 @@ flowchart TB
         "transition_hints": ["..."]
       }
     ],
-    "intent_embeddings": [[0.01, ...], [0.02, ...]]
+    "embedding_text": "PAGE_PURPOSE:\n...\n\nACTIVE_TAB:\n...\n\nUSER_INTENTS:\n[...]",
+    "embedding": [0.01, 0.02, ...]
   }
 }
 ```
 
-| Field | Source | Notes |
-|-------|--------|-------|
-| `user_intents` | `get_node_user_intents` | One ranked list per node; from **primary path** only; deduplicated |
-| `ui_navigation_memory` | `get_node_navigation_plans` | **One plan per root** path to this node |
-| `intent_embeddings` | post-process | Dense vectors for each `user_intent` string (retrieval) |
+| Field | Stage | Notes |
+|-------|-------|-------|
+| `user_intents` | 1 | One ranked list per node; from **primary path** only; deduplicated |
+| `ui_navigation_memory` | 1 | **One plan per root** path to this node (list length = number of roots) |
+| `embedding_text` | 2 | Concatenated graph metadata + `user_intents` used as the embedder input |
+| `embedding` | 2 | One dense vector per **node** (not per intent string) for retrieval |
 
 ### Run via `run_post_process.sh`
 
@@ -370,13 +398,13 @@ post_process:
 
 Image size/quality keys apply **only** to `get_node_user_intents`. `get_node_navigation_plans` is text-only and ignores them.
 
-**API keys:** `vlm.alibaba_api_key` for DashScope; `vlm.yibu_api_key` when `post_process.use_yibu_api: true`. Intent embeddings use the text embedder in `ImageUtils` (DashScope `text-embedding-v4`), not the post-process VLM model.
+**API keys:** `vlm.alibaba_api_key` for DashScope; `vlm.yibu_api_key` when `post_process.use_yibu_api: true`. Stage 2 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use the post-process VLM or `ImageUtils` text embedder.
 
 ### Outputs (post-processing)
 
 | File | Contents |
 |------|----------|
-| `node_intents.json` | Per-node `user_intents`, `ui_navigation_memory` (one per root), `intent_embeddings` |
+| `node_intents.json` | Per-node `user_intents`, `ui_navigation_memory` (one per root), `embedding_text`, `embedding` |
 | `post_process.log` | Console log when using `run_post_process.sh` |
 
 ### Preparing an app for inference (checklist)
@@ -384,8 +412,8 @@ Image size/quality keys apply **only** to `get_node_user_intents`. `get_node_nav
 1. **Device + config** — [Verify driver and reset](#1-verify-the-driver--especially-reset_to_start_page), create YAML with `driver`, `agent`, `vlm`, `graph`, `logs`, `post_process`.
 2. **Explore** — `CONFIG=configs/your_app.yaml ./run_explore.sh` until the graph is large enough.
 3. **Confirm artifacts** — under `logs.root`: `graph.json`, `screenshots/*.jpg`, `app_graph.pkl`.
-4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → `node_intents.json`.
-5. **Downstream inference** — match queries against `intent_embeddings` / `user_intents`; replay routes using `ui_navigation_memory` + graph/screenshots.
+4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → `node_intents.json` (Stage 1 VLM + Stage 2 BGE-M3).
+5. **Downstream inference** — match queries against `embedding` / `user_intents`; replay routes using `ui_navigation_memory` (pick the plan for the relevant root) + graph/screenshots.
 
 ---
 
@@ -486,7 +514,7 @@ Graph/
 
 explore.py                  # CLI entry: --config, exploration loop, logs_num_walks_nodes, plot_nodes_vs_walk → num_nodes_vs_walk.png
 run_explore.sh              # optional wrapper: tee console log to logs.root/explore.log
-post_process.py             # CLI: intents (multimodal) + nav plans (text) → node_intents.json
+post_process.py             # CLI: Stage 1 VLM intents + nav plans; Stage 2 BGE-M3 embeddings → node_intents.json
 run_post_process.sh         # wrapper: tee console log to logs.root/post_process.log
 VLM.py                      # DashScope multimodal + embeddings
 VLM_Yibu.py                 # Yibu multimodal (OpenAI-compatible); embeddings still DashScope
@@ -1164,7 +1192,7 @@ Outputs under `logs.root` (e.g. `explored_apps/clock/`):
 | `debug_paths/debug_path_screenshot_history_{N}_llm_based_bfs_{step}.jpg` | Per successful BFS branch in `llm_based_bfs` (shortest-path node screenshots + branch landing) |
 | `num_nodes_vs_walk.png` | Exploration progress chart (updated after each walk); see [Exploration progress plot](#exploration-progress-plot) |
 | `interactive_node_graph.html` | Visual graph explorer |
-| `node_intents.json` | Post-processing: `user_intents`, `ui_navigation_memory` (one per root), `intent_embeddings` |
+| `node_intents.json` | Post-processing: `user_intents`, `ui_navigation_memory` (one per root), `embedding_text`, `embedding` |
 | `post_process.log` | Console stdout/stderr when using `run_post_process.sh` |
 
 ### Exploration progress plot
@@ -1837,7 +1865,7 @@ If the agent keeps conversation state:
 |------|------|
 | `explore.py` | CLI (`--config`), `VLM` vs `VLM_Yibu` from `vlm.use_yibu_api`, schedule depth, mode selection, `load_or_create_app_graph`, resume, per-walk export, `plot_nodes_vs_walk` / `num_nodes_vs_walk.png` |
 | `run_explore.sh` | Run `explore.py` with `CONFIG=...`; tee log to `{logs.root}/explore.log` — see [How to run](#how-to-run) |
-| `post_process.py` | Read `graph.json` + screenshots; `get_node_user_intents` (primary path) + `get_node_navigation_plans` (all paths) → `node_intents.json` |
+| `post_process.py` | Stage 1: VLM `get_node_user_intents` (primary path) + `get_node_navigation_plans` (all roots, parallel); Stage 2: BGE-M3 node embeddings → `node_intents.json` |
 | `run_post_process.sh` | Run `post_process.py` with `CONFIG=...`; tee log to `{logs.root}/post_process.log` — see [Post-processing](#post-processing-post_processpy) |
 | `Graph/AppGraph.py` | NetworkX graph, `add_node` / `add_edge`, JSON + pickle export; `logs_num_walks_nodes` for progress plot |
 | `Graph/Node.py` | Screen node creation, VLM elements, `refresh_elements`, `backtracking_action` |
