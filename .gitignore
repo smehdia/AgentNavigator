@@ -23,3 +23,8 @@ temp_*
 */explored_apps/*.jpeg
 **/*/explored_apps/*.jpeg
 **/**/*/explored_apps/*.jpeg
+./exploration/*.jpeg
+**/exploration/*.jpeg
+*/exploration/*.jpeg
+**/*/exploration/*.jpeg
+**/**/*/exploration/*.jpeg
