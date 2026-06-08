@@ -116,3 +116,5 @@ default:
     vlm_processing_img_quality_for_last_screenshot: 90
     vlm_processing_img_size_for_other_screenshots: 1024
     vlm_processing_img_quality_for_other_screenshots: 88
+
+    
