@@ -28,3 +28,8 @@ temp_*
 */exploration/*.jpeg
 **/*/exploration/*.jpeg
 **/**/*/exploration/*.jpeg
+./inference/*.jpeg
+**/inference/*.jpeg
+*/inference/*.jpeg
+**/*/inference/*.jpeg
+**/**/*/inference/*.jpeg
