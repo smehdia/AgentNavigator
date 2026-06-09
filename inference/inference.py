@@ -12,6 +12,7 @@ import json
 from networkx.readwrite import json_graph
 import os
 import cv2
+import time
 import pickle
 import argparse
 import numpy as np 
@@ -358,9 +359,11 @@ if __name__ == "__main__":
 
     print("START NAVIGATION")
     for _ in range(getattr(configs, "max_agent_steps", 10)):
+        s = time.time()
         step_result, _ = agent.step(navigation_memory, driver.take_screenshot())
         parsed = step_result[0] if isinstance(step_result, tuple) else step_result
         print(parsed)
+        dbg.log(f"Time per step: {time.time() - s} seconds", color="green")
         if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
             finish_flag = True
             break
