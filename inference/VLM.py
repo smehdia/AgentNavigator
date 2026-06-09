@@ -98,21 +98,29 @@ class VLM:
                     "text": (
                         "You are a strict reranking module for Android UI navigation.\n"
                         "Your task is to select the best target nodes for a user's navigation query.\n\n"
-                        "Each candidate has:\n"
+                        "Each candidate may contain:\n"
                         "- node_id: unique node identifier\n"
                         "- page_purpose: what the page/screen is mainly for\n"
-                        "- depth: navigation depth from root; lower is usually easier to reach\n"
-                        "- user_intents: possible user goals for that page\n"
-                        "- best_matched_intent: the intent most similar to the query\n"
-                        "- best_matched_intent_score: embedding similarity between query and intent\n"
-                        "- ui_navigation_memory: waypoint and transition hints for reaching the node\n\n"
+                        "- depth: navigation depth from root; lower means easier to reach\n"
+                        "- score: embedding similarity score between the query and the node\n"
+                        "- user_intents: possible user goals supported by this node\n"
+                        "- ui_navigation_memory: waypoint and transition hints\n\n"
                         "Ranking rules:\n"
                         "1. Prefer candidates whose page_purpose directly satisfies the user query.\n"
-                        "2. Then prefer candidates whose best_matched_intent directly matches the query.\n"
-                        "3. Use best_matched_intent_score as a helpful signal, but do not blindly follow it.\n"
-                        "4. Prefer shallower nodes when relevance is similar.\n"
-                        "5. Penalize nodes that are only indirectly related, even if their score is high.\n"
-                        "6. Return exactly top_k node_ids.\n\n"
+                        "2. Match the specificity of the user query:\n"
+                        "   - If the query is broad or generic, prefer the broad parent page.\n"
+                        "   - If the query is specific, prefer the most specific page that directly satisfies it.\n"
+                        "3. Do not select a more specific sub-setting page unless the query explicitly mentions that specific setting.\n"
+                        "4. Then prefer candidates whose user_intents directly match the query.\n"
+                        "5. Relevance and specificity are more important than depth or embedding score.\n"
+                        "6. Use depth only as a tie-breaker when relevance and specificity are similar.\n"
+                        "7. Penalize menus, dialogs, popups, temporary overlays, and intermediate screens unless the query explicitly asks for them.\n"
+                        "8. Penalize candidates that are only indirectly related, even if their embedding score is high.\n"
+                        "9. Only select node_ids from the provided candidates.\n\n"
+                        "Examples:\n"
+                        "- For 'go to settings', prefer the main Settings page over Alarm settings, Timer settings, World clock style, or Date/time settings.\n"
+                        "- For 'change world clock style', prefer the specific World clock style/settings page over the generic Settings page.\n"
+                        "- For 'open alarm settings', prefer Alarm settings over the generic Settings page.\n\n"
                         "You must output valid JSON only."
                     )
                 }
@@ -124,11 +132,10 @@ class VLM:
             compact_candidates.append(
                 {
                     "node_id": c.get("node_id"),
-                    "page_purpose": c.get("page_purpose"),
+                    "page_purpose": c.get("page_purpose", ""),
                     "depth": c.get("depth"),
+                    "score": c.get("score"),
                     "user_intents": c.get("user_intents", []),
-                    "best_matched_intent": c.get("best_matched_intent"),
-                    "best_matched_intent_score": c.get("best_matched_intent_score"),
                     "ui_navigation_memory": c.get("ui_navigation_memory", []),
                 }
             )
@@ -136,7 +143,12 @@ class VLM:
         prompt = (
             "User query:\n"
             f"{user_query}\n\n"
-            f"Select the best top_k={top_k} candidate nodes.\n\n"
+            "Specificity guidance:\n"
+            "- Broad query means the user asks for a general destination, such as settings, alarms, timer, stopwatch, profile, or help.\n"
+            "- Specific query means the user asks for a particular option, preference, subpage, configuration, or action.\n"
+            "- For a broad query, select the broadest directly matching page.\n"
+            "- For a specific query, select the most specific page that directly satisfies the requested goal.\n\n"
+            f"Select exactly {top_k} best candidate nodes.\n\n"
             "Candidate nodes:\n"
             f"{json.dumps(compact_candidates, indent=2, ensure_ascii=False)}\n\n"
             "Return JSON in exactly this format:\n"
@@ -149,7 +161,7 @@ class VLM:
             "}\n\n"
             f"The list top_k_node_ids must contain exactly {top_k} node_ids.\n"
             "Only use node_ids that appear in the provided candidates.\n"
-            "Do not include any markdown or extra text."
+            "Do not include markdown or extra text."
         )
 
         user_msg = {

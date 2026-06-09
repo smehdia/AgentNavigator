@@ -15,6 +15,8 @@ import cv2
 import pickle
 import argparse
 import numpy as np 
+import gradio as gr
+
 
 import networkx as nx
 
@@ -22,33 +24,86 @@ for var in ["http_proxy", "https_proxy", "ftp_proxy", "socks_proxy",
             "HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "SOCKS_PROXY"]:
     os.environ.pop(var, None)
 
+from FlagEmbedding import BGEM3FlagModel
 
-def sort_nodes_based_on_node_intent_similarity(query, node_intents, debugger, image_utils):
 
-    with debugger.time_block("Computing query embedding:", color='green'):
-        query_embedding = np.asarray(image_utils.text_model_embedder.encode(query, max_length=1024)['dense_vecs'])
+def retrieve_nodes_from_user_intents_embeddings(
+    root_path,
+    query,
+    embedded_intents_filename="node_intents.json",
+    bge_model_name="BAAI/bge-m3",
+    top_k=5,
+):
+    path = os.path.join(root_path, embedded_intents_filename)
 
-    # compute the simlarity between the query embeddings and the node intents embeddings
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    with debugger.time_block("Stage 1 retrieval:", color='green'):
-        query = query_embedding.ravel().astype(np.float32)
-        node_ids, intents, embs = [], [], []
-        for node_id, data in node_intents.items():
-            for intent, emb in zip(data['user_intents'], data['intent_embeddings']):
-                node_ids.append(node_id)
-                intents.append(intent)
-                embs.append(emb)
-        if not embs:
-            return []
-        E = np.asarray(embs, dtype=np.float32)
-        q_norm = np.linalg.norm(query) + 1e-8
-        e_norm = np.linalg.norm(E, axis=1) + 1e-8
-        scores = (E @ query) / (e_norm * q_norm)
-        results = list(zip(node_ids, intents, scores.tolist()))
-        results.sort(key=lambda x: x[2], reverse=True)
+    node_ids = []
+    embeddings = []
 
+    for node_id, item in data.items():
+        if "embedding" not in item:
+            continue
+
+        node_ids.append(node_id)
+        embeddings.append(item["embedding"])
+
+    embeddings = np.asarray(embeddings, dtype=np.float32)
+
+    model = BGEM3FlagModel(
+        bge_model_name,
+        use_fp16=True,
+    )
+
+    outputs = model.encode(
+        [query],
+        batch_size=1,
+        max_length=8192,
+        return_dense=True,
+        return_sparse=False,
+        return_colbert_vecs=False,
+    )
+
+    query_embedding = np.asarray(outputs["dense_vecs"], dtype=np.float32)
+
+    query_embedding = query_embedding / np.maximum(
+        np.linalg.norm(query_embedding, axis=1, keepdims=True),
+        1e-12,
+    )
+
+    scores = embeddings @ query_embedding[0]
+    top_indices = np.argsort(scores)[::-1][:top_k]
+
+    results = []
+
+    for rank, idx in enumerate(top_indices, start=1):
+        node_id = node_ids[int(idx)]
+        item = data[node_id]
+
+        results.append(
+            {
+                "rank": rank,
+                "score": float(scores[idx]),
+                "node_id": node_id,
+                "user_intents": item.get("user_intents", []),
+                "ui_navigation_memory": item.get("ui_navigation_memory", []),
+                "embedding_text": item.get("embedding_text", ""),
+            }
+        )
 
     return results
+
+def build_retrieval_query(user_goal: str) -> str:
+    return f"""
+PAGE_PURPOSE:
+A UI page or screen for this goal: {user_goal}
+
+USER_INTENTS:
+{user_goal}
+""".strip()
+
+
 
 
 def get_node_depths(G):
@@ -77,18 +132,13 @@ def get_node_depths(G):
 
 def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
     """
-    Simplified: Given a list of navigation plans (each a dict with
-    'relevant_waypoint_sequence' and 'transition_hints') and a final_goal string,
-    output one formatted string as described.
+    Format navigation memory plans for UI-TARS.
 
-    If there are multiple plans, we enumerate as [Plan 1], [Plan 2], etc.
-
-    Args:
-        navigation_memory_plans: List[dict]
-        final_goal: str
-
-    Returns:
-        str
+    Notes:
+    - navigation_memory_plans may contain multiple alternative plans from different roots.
+    - The agent should first select the plan whose waypoints best match the current screenshot.
+    - Once the final goal is reached, the agent should finish immediately.
+    - If no plans are available, return an empty string so the caller can build the prompt without memory.
     """
 
     if not isinstance(navigation_memory_plans, list):
@@ -96,43 +146,138 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
     if not isinstance(final_goal, str):
         raise TypeError("final_goal must be a string")
 
-    output = [f"Final Goal:\n{final_goal.strip()}\n"]
-
     if not navigation_memory_plans:
-        output.append("[Navigation Memory]\nNo plans available.")
-        return "\n".join(output)
+        return (
+            "[Navigation Instruction]\n"
+            f"Final goal: {final_goal.strip() if final_goal.strip() else '(none)'}\n\n"
+            "No navigation memory is available for this task. "
+            "Use only the current screenshot and the user goal to decide the next action. "
+            "If the current screen already satisfies the final goal, do not perform more navigation actions. "
+            "Return the finish/done action immediately."
+        )
 
-    output.append("[Navigation Memory]")
+    output_lines = []
+
+    output_lines.append("[Navigation Memory]")
+    output_lines.append(
+        "There may be multiple alternative navigation plans, possibly generated from different roots. "
+        "Before acting, compare the current screenshot with the waypoint sequences and transition hints, "
+        "then follow the plan that best matches the current screen. "
+        "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan."
+    )
+
     for idx, plan in enumerate(navigation_memory_plans, 1):
-        plan_title = f"[Plan {idx}]"
-        output.append(plan_title)
-        waypoints = plan.get("relevant_waypoint_sequence", []) or []
-        hints = plan.get("transition_hints", []) or []
+        output_lines.append("")
+        output_lines.append(f"[Plan {idx}]")
 
-        # Format waypoints
-        if waypoints and isinstance(waypoints, list):
+        goal = plan.get("final_goal") if plan.get("final_goal") is not None else final_goal
+        goal = goal.strip() if isinstance(goal, str) else ""
+
+        output_lines.append(f"Final goal: {goal if goal else '(none)'}")
+
+        # Optional root id, useful when plans come from different graph roots
+        root_id = plan.get("root_id")
+        if root_id:
+            output_lines.append(f"Root id: {str(root_id).strip()}")
+
+        # Waypoints
+        waypoints = plan.get("relevant_waypoint_sequence", [])
+        output_lines.append("\nRelevant waypoint sequence:")
+
+        if isinstance(waypoints, list) and waypoints:
             wp_str = " -> ".join(str(w).strip() for w in waypoints if str(w).strip())
+            output_lines.append(wp_str if wp_str else "(none)")
         else:
-            wp_str = ""
-        output.append("Relevant waypoint sequence:")
-        output.append(wp_str if wp_str else "(none)")
+            output_lines.append("(none)")
 
-        # Format hints
-        output.append("Transition hints:")
-        if hints and isinstance(hints, list):
+        # Transition hints
+        hints = plan.get("transition_hints", [])
+        output_lines.append("\nTransition hints:")
+
+        if isinstance(hints, list) and hints:
+            added_hint = False
             for hint in hints:
                 hint_str = str(hint).strip()
                 if hint_str:
-                    output.append(f"- {hint_str}")
+                    output_lines.append(f"- {hint_str}")
+                    added_hint = True
+            if not added_hint:
+                output_lines.append("(none)")
         else:
-            output.append("-")
+            output_lines.append("(none)")
 
-        # Separate plans by an empty line except after last plan
-        if idx < len(navigation_memory_plans):
-            output.append("")
+        # Plan-specific usage instruction, if available
+        usage_instruction = plan.get("usage_instruction")
+        if usage_instruction:
+            output_lines.append("\nPlan-specific usage instruction:")
+            output_lines.append(str(usage_instruction).strip())
 
-    return "\n".join(output).strip()
+    output_lines.append("")
+    output_lines.append("[Global usage instruction]")
+    output_lines.append(
+        "First identify whether the current screenshot matches any plan. "
+        "Select the plan whose current or next waypoint best corresponds to the visible screen. "
+        "Then take the action that most likely advances to the next waypoint in that selected plan. "
+        "Do not mix steps from different plans unless the screenshot clearly supports doing so. "
+        "If the screenshot clearly disagrees with all plans, ignore the plans and follow the screenshot. "
+        "Once the current screen already satisfies the final goal, do not perform more navigation actions. "
+        "Return the finish/done action immediately."
+    )
 
+    return "\n".join(output_lines).strip()
+
+
+def pick_candidate(candidates, screenshots_dir, user_query="", vlm_reasoning=None):
+    selection = {"node_id": None}
+    def _screenshot_path(node_id):
+        path = os.path.join(screenshots_dir, f"{node_id}.jpg")
+        return path if os.path.exists(path) else None
+    def _format_caption(c):
+        lines = [
+            f"**{c['node_id']}**",
+            f"score={c['score']:.3f} | depth={c['depth']}",
+            "",
+            c.get("page_purpose", ""),
+        ]
+        if vlm_reasoning and c["node_id"] in vlm_reasoning:
+            lines += ["", f"_VLM: {vlm_reasoning[c['node_id']]}_"]
+        intents = c.get("user_intents") or []
+        if intents:
+            lines += ["", "**Intents:**"] + [f"- {i}" for i in intents[:5]]
+        return "\n".join(lines)
+    gallery_items = []
+    for c in candidates:
+        path = _screenshot_path(c["node_id"])
+        if path:
+            gallery_items.append((path, _format_caption(c)))
+    radio_choices = [
+        (
+            f"{c['node_id']} | score={c['score']:.3f} | depth={c['depth']} | "
+            f"{(c.get('page_purpose') or '')[:60]}",
+            c["node_id"],
+        )
+        for c in candidates
+    ]
+    with gr.Blocks(title="Pick navigation target") as demo:
+        gr.Markdown(f"### Query\n{user_query}")
+        gr.Markdown("Pick the page that best matches your goal.")
+        gr.Gallery(value=gallery_items, columns=3, height=500, object_fit="contain")
+        radio = gr.Radio(
+            choices=radio_choices,
+            label="Select target page",
+            value=radio_choices[0][1] if radio_choices else None,
+        )
+        out = gr.Textbox(label="Selected node_id", interactive=False)
+        btn = gr.Button("Confirm and continue", variant="primary")
+        def confirm(node_id):
+            if not node_id:
+                raise gr.Error("Select a candidate first.")
+            selection["node_id"] = node_id
+            demo.close()
+            return node_id
+        btn.click(confirm, inputs=radio, outputs=out)
+    demo.launch(server_name="127.0.0.1", share=False)
+    return selection["node_id"]
 
 
 if __name__ == "__main__":
@@ -143,7 +288,7 @@ if __name__ == "__main__":
 
     # i want to get config file from user
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/clock_android.yaml")
+    parser.add_argument("--config", type=str, default="configs/clock_harmony.yaml")
     args = parser.parse_args()
 
     configs = Dynaconf(settings_files=[args.config], merge_enabled=True)
@@ -172,42 +317,40 @@ if __name__ == "__main__":
         user_query = input("Enter your query: ")
 
 
-    relavance_scores_results = sort_nodes_based_on_node_intent_similarity(user_query, node_intents, dbg, image_utils)
-    top_k = configs.top_k_in_first_stage_retrieval
-    relavance_scores_results = relavance_scores_results[:top_k]
+    if configs.use_memory_for_navigation:
+        results = retrieve_nodes_from_user_intents_embeddings(
+            root_path=configs.logs.root,
+            query=build_retrieval_query(user_query),
+            top_k=configs.top_k_in_first_stage_retrieval,
+        )
+        candidates = []
+        for result in results:
+            node_id = result["node_id"]
+            candidates.append({
+                "node_id": result["node_id"],
+                "page_purpose": graph.nodes[node_id]['page_purpose'],
+                "depth": depths[node_id],
+                "score": result["score"],
+                "user_intents": node_intents[node_id]['user_intents'],
+                "ui_navigation_memory": node_intents[node_id]['ui_navigation_memory'],
+            })
 
-    candidates = []
-    for result in relavance_scores_results:
-        node_id = result[0]
-        candidates.append({
-            "node_id": result[0],
-            "page_purpose": graph.nodes[node_id]['page_purpose'],
-            "depth": depths[node_id],
-            "user_intents": node_intents[node_id]['user_intents'],
-            "best_matched_intent": result[1],
-            "best_matched_intent_score": result[2],
-            "ui_navigation_memory": node_intents[node_id]['ui_navigation_memory'],
-        })
+        top_k_node_ids, result = vlm_client.rerank_candidates(user_query, candidates, top_k=configs.top_k_retrieval_in_stage_2)
 
-    top_k_node_ids, result = vlm_client.rerank_candidates(user_query, candidates, top_k=configs.top_k_retrieval_in_stage_2)
+        # we filter candidates to only keep the one that node_ids are in top_k_node_ids
+        candidates = [c for c in candidates if c["node_id"] in top_k_node_ids]
+        selected_node_id = pick_candidate(candidates, os.path.join(configs.logs.root, "screenshots"), vlm_reasoning=result)
 
-    # for node_id in top_k_node_ids:
-    #     if os.path.exists(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg")):
-    #         screenshot = cv2.imread(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg"))
-    #         cv2.imshow('out1', cv2.resize(screenshot, None, fx=0.5, fy=0.5))
-    #         cv2.waitKey(0)
-    #         cv2.destroyAllWindows()
-    #     else:
-    #         print(f"Screenshot for node {node_id} not found")
-    #         continue
+        navigation_memory = node_intents[selected_node_id]['ui_navigation_memory']
+    else:
+        navigation_memory = []
 
 
-    # top node
-    top_node_id = top_k_node_ids[0]
-    top_node_navigation_memory = node_intents[top_node_id]['ui_navigation_memory']
-    top_node_navigation_memory = format_navigation_plan(top_node_navigation_memory, user_query)
-    
-    print(top_node_navigation_memory)
+    navigation_memory = format_navigation_plan(navigation_memory, user_query)
+
+
+    dbg.log("Using Memory for Navigation: ", configs.use_memory_for_navigation)
+    dbg.log(f"Navigation memory: {navigation_memory}")
 
     driver.reset_to_start_page()
     finish_flag = False
@@ -216,7 +359,7 @@ if __name__ == "__main__":
     agent.clear_history()
     print("START NAVIGATION")
     for _ in range(10):
-        step_result, _ = agent.step(top_node_navigation_memory, driver.take_screenshot())
+        step_result, _ = agent.step(navigation_memory, driver.take_screenshot())
         parsed = step_result[0] if isinstance(step_result, tuple) else step_result
         print(parsed)
         if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
