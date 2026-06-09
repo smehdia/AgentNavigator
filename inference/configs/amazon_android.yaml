@@ -35,5 +35,6 @@ default:
   query: "Navigate to the customer service home page."
   top_k_in_first_stage_retrieval: 30
   top_k_retrieval_in_stage_2: 3
+  max_agent_steps: 10
 
 

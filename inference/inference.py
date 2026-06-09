@@ -353,12 +353,11 @@ if __name__ == "__main__":
     dbg.log(f"Navigation memory: {navigation_memory}")
 
     driver.reset_to_start_page()
-    finish_flag = False
-    max_step = 10
-    # reset memory of agent
     agent.clear_history()
+    finish_flag = False
+
     print("START NAVIGATION")
-    for _ in range(10):
+    for _ in range(getattr(configs, "max_agent_steps", 10)):
         step_result, _ = agent.step(navigation_memory, driver.take_screenshot())
         parsed = step_result[0] if isinstance(step_result, tuple) else step_result
         print(parsed)
