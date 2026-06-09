@@ -565,6 +565,36 @@ configs/
 
 Point `agent.url` at an OpenAI-compatible endpoint (vLLM, etc.) serving MAI-UI or UI-TARS. The agent calls `GET {url}/models` on startup to verify health and discover the model id.
 
+**MAI-UI (`model_name: mai_ui`):** serve **HuggingFace** [`Tongyi-MAI/MAI-UI-8B`](https://huggingface.co/Tongyi-MAI/MAI-UI-8B). Use **vLLM &lt; 0.2** — the official stack pins **`vllm==0.11.0`**. **vLLM 0.21+** can produce correct-looking `<thinking>` text but **wrong tap coordinates** after client-side resize mapping. Also pin server deps such as `transformers==4.57.6` (&lt; 5.0), `tokenizers` 0.22.x, and `numpy≤2.2`.
+
+**Agent smoke test (strongly encouraged):** after the server is up, run `grounding_action` on one screenshot and optionally `execute_action` before `explore.py` or a long reset loop:
+
+```python
+from dynaconf import Dynaconf
+from Agents.factory import build_agent
+from Driver.factory import build_driver
+
+configs = Dynaconf(settings_files=["configs/amazon_android.yaml"]).default
+agent = build_agent(
+    model_name=configs.agent.model_name,
+    url=configs.agent.url,
+    agent_settings=configs.agent.settings,
+)
+driver = build_driver(settings=configs.driver, agent=agent)
+driver.reset_to_start_page()  # or driver.take_screenshot() on the screen you want to test
+
+screenshot = driver.take_screenshot()
+(parsed, sent_w, sent_h), meta = agent.grounding_action(
+    "the search icon in the top bar",  # describe one clear on-screen element
+    screenshot,
+)
+print(parsed.thought, parsed.orig_coords)
+
+driver.execute_action(parsed)  # optional — confirm the tap hits the intended control
+```
+
+Wrong coordinates here usually mean a server-side stack issue (vLLM version), not a bug in `Driver/` or `Agents/` resize logic.
+
 ### 2. Configure
 
 In `configs/config_global.yaml`:
@@ -1926,3 +1956,13 @@ If the agent keeps conversation state:
 - Vision input via `image_url` (UI-TARS JPEG data URL) or base64 PNG (MAI-UI)
 
 Ensure the served model matches `model_name` in config (`mai_ui` → MAI-UI weights, `ui_tars` → UI-TARS 1.5 weights).
+
+### MAI-UI / vLLM
+
+| Requirement | Notes |
+|-------------|--------|
+| Model weights | [`Tongyi-MAI/MAI-UI-8B`](https://huggingface.co/Tongyi-MAI/MAI-UI-8B) on HuggingFace |
+| vLLM version | **&lt; 0.2** — use **`vllm==0.11.0`** (official MAI-UI recommendation). **0.21+** risks coordinate/grounding mismatches. |
+| Related pins | `transformers==4.57.6`, `tokenizers` 0.22.x, `numpy≤2.2` |
+
+Before exploration or inference, smoke-test grounding on one screenshot (`agent.grounding_action` → optional `driver.execute_action`) as in [Quick start §1](#1-start-a-model-server).

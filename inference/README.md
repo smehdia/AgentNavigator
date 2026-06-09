@@ -89,6 +89,40 @@ The on-device navigation model (MAI-UI or UI-TARS). Built by `Agents.factory.bui
 | `settings.history_n` | Number of past steps kept in agent memory |
 | `settings.resize_factor` | Screenshot resize factor sent to the agent |
 
+#### MAI-UI server (vLLM)
+
+When `model_name` is `mai_ui`, serve **HuggingFace** [`Tongyi-MAI/MAI-UI-8B`](https://huggingface.co/Tongyi-MAI/MAI-UI-8B) behind an OpenAI-compatible endpoint.
+
+**vLLM version:** use **vLLM &lt; 0.2** (the official MAI-UI stack pins **`vllm==0.11.0`**). **vLLM 0.21+** has been observed to return plausible reasoning but **wrong grounding coordinates** (taps land on the wrong UI element). Pin compatible deps on the server, e.g. `transformers==4.57.6` (&lt; 5.0), `tokenizers` 0.22.x, `numpy≤2.2`.
+
+**Smoke test (strongly encouraged):** before a full `inference.py` run, verify grounding on a single device screenshot:
+
+```python
+from dynaconf import Dynaconf
+from Agents.factory import build_agent
+from Driver.factory import build_driver
+
+configs = Dynaconf(settings_files=["configs/amazon_android.yaml"]).default
+agent = build_agent(
+    model_name=configs.agent.model_name,
+    url=configs.agent.url,
+    agent_settings=configs.agent.settings,
+)
+driver = build_driver(settings=configs.driver, agent=agent)
+
+screenshot = driver.take_screenshot()
+(parsed, sent_w, sent_h), meta = agent.grounding_action(
+    "click on the Haul chip button",  # pick a visible, unambiguous target on this screen
+    screenshot,
+)
+print(parsed.thought, parsed.orig_coords)
+
+# Optional: tap on device and confirm the UI responds as expected
+driver.execute_action(parsed)
+```
+
+If coordinates look wrong (e.g. Y lands on a different row than the described element), fix the agent server stack (vLLM version and pins above) before relying on navigation.
+
 ### `logs`
 
 | Field | Description |
@@ -268,6 +302,7 @@ Device control and agents are provided under `Driver/` and `Agents/` in this dir
 | `No root node found with is_root=True` | `graph.json` must mark at least one node with `is_root: true` |
 | Gradio opens but no images | `screenshots/{node_id}.jpg` paths under `logs.root` |
 | Agent does nothing / wrong screen | `reset_instruction`, `appPackage` / `appActivity`, agent `url` reachable |
+| Agent reasoning OK but taps miss UI | MAI-UI server likely on **vLLM ≥ 0.2** (e.g. 0.21.x) — use **vllm==0.11.0**; run the [grounding smoke test](#mai-ui-server-vllm) |
 | Retrieval picks wrong page | Increase `top_k_in_first_stage_retrieval`, lower stage-2 `top_k`, or fix pick in Gradio |
 | Skip retrieval entirely | Set `use_memory_for_navigation: false` |
 
