@@ -29,6 +29,7 @@ import networkx as nx
 import requests
 import urllib3
 
+
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _API_LOGGER_PKG_DIR = os.path.join(_SCRIPT_DIR, "api_logger")
 if os.path.isdir(_API_LOGGER_PKG_DIR) and _API_LOGGER_PKG_DIR not in sys.path:
@@ -184,7 +185,7 @@ class YibuMultimodalResponse:
 class VLM_Yibu:
     def __init__(self, configs, debugger):
         self.total_calls = {}
-        self.token_usage_details = {}
+        self.token_usage_details = dict()
         self.yibu_api_key = str(configs.vlm.yibu_api_key).strip()
         self.yibu_base_url = str(
             getattr(configs.vlm, "yibu_base_url", "https://yibuapi.com")
@@ -543,20 +544,33 @@ class VLM_Yibu:
             seed=42
         )
 
-        image_input_tokens = resp.usage.input_tokens_details['image_tokens']
-        text_input_tokens = resp.usage.input_tokens_details['text_tokens']
-        output_tokens = resp.usage.output_tokens_details['text_tokens']
+        try:
+            image_input_tokens = resp.usage.input_tokens_details['image_tokens']
+            text_input_tokens = resp.usage.input_tokens_details['text_tokens']
+            output_tokens = resp.usage.output_tokens_details['text_tokens']
+        except Exception as e:
+            print(f"Error getting usage details: {e}")
+            image_input_tokens = 0
+            text_input_tokens = 0
+            output_tokens = 0
 
-        if self.configs.vlm.model_name_for_elements_extraction in self.token_usage_details.keys():
-            self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction]["image_input_tokens"] += image_input_tokens
-            self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction]["text_input_tokens"] += text_input_tokens
-            self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction]["output_tokens"] += output_tokens
-        else:
-            self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction] = {
-                "image_input_tokens": image_input_tokens,
-                "text_input_tokens": text_input_tokens,
-                "output_tokens": output_tokens
+
+        model_key = self.configs.vlm.model_name_for_elements_extraction
+        if model_key not in self.token_usage_details:
+            self.token_usage_details[model_key] = {
+                "image_input_tokens": 0,
+                "text_input_tokens": 0,
+                "output_tokens": 0
             }
+        for k, v in [
+            ("image_input_tokens", image_input_tokens),
+            ("text_input_tokens", text_input_tokens),
+            ("output_tokens", output_tokens),
+        ]:
+            if k not in self.token_usage_details[model_key]:
+                self.token_usage_details[model_key][k] = 0
+            self.token_usage_details[model_key][k] += v
+   
 
         raw = resp.output.choices[0].message.content
         raw_text = (
@@ -871,22 +885,34 @@ class VLM_Yibu:
             seed=42,
         )
 
-        image_input_tokens = resp.usage.input_tokens_details["image_tokens"]
-        text_input_tokens = resp.usage.input_tokens_details["text_tokens"]
-        output_tokens = resp.usage.output_tokens_details["text_tokens"]
+        try:
+            image_input_tokens = resp.usage.input_tokens_details['image_tokens']
+            text_input_tokens = resp.usage.input_tokens_details['text_tokens']
+            output_tokens = resp.usage.output_tokens_details['text_tokens']
+        except Exception as e:
+            print(f"Error getting usage details: {e}")
+            image_input_tokens = 0
+            text_input_tokens = 0
+            output_tokens = 0
 
-        model_name = self.configs.vlm.model_name_for_page_summary
 
-        if model_name in self.token_usage_details.keys():
-            self.token_usage_details[model_name]["image_input_tokens"] += image_input_tokens
-            self.token_usage_details[model_name]["text_input_tokens"] += text_input_tokens
-            self.token_usage_details[model_name]["output_tokens"] += output_tokens
-        else:
-            self.token_usage_details[model_name] = {
-                "image_input_tokens": image_input_tokens,
-                "text_input_tokens": text_input_tokens,
-                "output_tokens": output_tokens,
+        model_key = self.configs.vlm.model_name_for_page_summary
+
+        if model_key not in self.token_usage_details:
+            self.token_usage_details[model_key] = {
+                "image_input_tokens": 0,
+                "text_input_tokens": 0,
+                "output_tokens": 0
             }
+        for k, v in [
+            ("image_input_tokens", image_input_tokens),
+            ("text_input_tokens", text_input_tokens),
+            ("output_tokens", output_tokens),
+        ]:
+            if k not in self.token_usage_details[model_key]:
+                self.token_usage_details[model_key][k] = 0
+            self.token_usage_details[model_key][k] += v
+
 
         raw = resp.output.choices[0].message.content
 
@@ -1130,16 +1156,21 @@ class VLM_Yibu:
                 if isinstance(out_details, dict)
                 else getattr(out_details, "text_tokens", 0)
             )
-            if model_name in self.token_usage_details:
-                self.token_usage_details[model_name]["image_input_tokens"] += image_input_tokens
-                self.token_usage_details[model_name]["text_input_tokens"] += text_input_tokens
-                self.token_usage_details[model_name]["output_tokens"] += output_tokens
-            else:
-                self.token_usage_details[model_name] = {
-                    "image_input_tokens": image_input_tokens,
-                    "text_input_tokens": text_input_tokens,
-                    "output_tokens": output_tokens,
+            model_key = model_name
+            if model_key not in self.token_usage_details:
+                self.token_usage_details[model_key] = {
+                    "image_input_tokens": 0,
+                    "text_input_tokens": 0,
+                    "output_tokens": 0
                 }
+            for k, v in [
+                ("image_input_tokens", image_input_tokens),
+                ("text_input_tokens", text_input_tokens),
+                ("output_tokens", output_tokens),
+            ]:
+                if k not in self.token_usage_details[model_key]:
+                    self.token_usage_details[model_key][k] = 0
+                self.token_usage_details[model_key][k] += v
 
         raw = resp.output.choices[0].message.content
         raw_text = (
@@ -1367,14 +1398,21 @@ class VLM_Yibu:
                 if isinstance(out_details, dict)
                 else getattr(out_details, "text_tokens", 0)
             )
-            if model_name in self.token_usage_details:
-                self.token_usage_details[model_name]["text_input_tokens"] += text_input_tokens
-                self.token_usage_details[model_name]["output_tokens"] += output_tokens
-            else:
-                self.token_usage_details[model_name] = {
-                    "text_input_tokens": text_input_tokens,
-                    "output_tokens": output_tokens,
+            model_key = model_name
+            if model_key not in self.token_usage_details:
+                self.token_usage_details[model_key] = {
+                    "image_input_tokens": 0,
+                    "text_input_tokens": 0,
+                    "output_tokens": 0
                 }
+            for k, v in [
+                ("image_input_tokens", 0),
+                ("text_input_tokens", text_input_tokens),
+                ("output_tokens", output_tokens),
+            ]:
+                if k not in self.token_usage_details[model_key]:
+                    self.token_usage_details[model_key][k] = 0
+                self.token_usage_details[model_key][k] += v
 
         raw = response.output.choices[0].message.content
         raw_text = (
@@ -1449,19 +1487,31 @@ class VLM_Yibu:
             seed=42,
         )
 
-        text_input_tokens = response.usage.input_tokens_details["text_tokens"]
-        output_tokens = response.usage.output_tokens_details["text_tokens"]
+        try:
+            text_input_tokens = response.usage.input_tokens_details['text_tokens']
+            output_tokens = response.usage.output_tokens_details['text_tokens']
+        except Exception as e:
+            print(f"Error getting usage details: {e}")
+            text_input_tokens = 0
+            output_tokens = 0
 
-        usage_key = self.configs.graph.exploration_modes.model_llm_bfs.model_name
 
-        if usage_key in self.token_usage_details:
-            self.token_usage_details[usage_key]["text_input_tokens"] += text_input_tokens
-            self.token_usage_details[usage_key]["output_tokens"] += output_tokens
-        else:
-            self.token_usage_details[usage_key] = {
-                "text_input_tokens": text_input_tokens,
-                "output_tokens": output_tokens,
+        model_key = self.configs.graph.global_localization.find_node_page_purpose_emphasize.compare_navigational_purpose_model
+        if model_key not in self.token_usage_details:
+            self.token_usage_details[model_key] = {
+                "image_input_tokens": 0,
+                "text_input_tokens": 0,
+                "output_tokens": 0
             }
+        for k, v in [
+            ("image_input_tokens", 0),
+            ("text_input_tokens", text_input_tokens),
+            ("output_tokens", output_tokens),
+        ]:
+            if k not in self.token_usage_details[model_key]:
+                self.token_usage_details[model_key][k] = 0
+            self.token_usage_details[model_key][k] += v
+
 
         raw = response["output"]["choices"][0]["message"]["content"]
         raw_text = (
