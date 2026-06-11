@@ -137,7 +137,11 @@ def build_paths_for_node(nx_graph, node_id):
     root_node_ids = [node_id for node_id, node in nx_graph.nodes(data=True) if node.get("is_root", False)]
     paths = dict()
     for root_node_id in root_node_ids:
-        node_path = nx.shortest_path(nx_graph, source=root_node_id, target=node_id)        
+        try:
+            node_path = nx.shortest_path(nx_graph, source=root_node_id, target=node_id)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            continue
+
         screenshots = []
         page_summaries = []
         actions = []
