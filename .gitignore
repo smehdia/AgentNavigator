@@ -2,6 +2,11 @@
 exploration/explored_apps/
 **/explored_apps/
 */explored_apps/
+./exploration/temp/*
+**/temp/*
+*/temp/*
+**/*/temp/*
+**/**/*/temp/*
 **/*/explored_apps/
 __pycache__/
 **/__pycache__/
