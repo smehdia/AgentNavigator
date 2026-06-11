@@ -4,7 +4,6 @@ from dynaconf import Dynaconf
 from Debugger import Debugger
 from Driver.factory import build_driver
 
-from ImageUtils import ImageUtils
 from VLM import VLM
 from Agents.factory import build_agent
 
@@ -13,16 +12,14 @@ from networkx.readwrite import json_graph
 import os
 import cv2
 import time
-import pickle
 import argparse
-import numpy as np 
+import numpy as np
 import gradio as gr
 import glob
 
-
 import networkx as nx
 
-for var in ["http_proxy", "https_proxy", "ftp_proxy", "socks_proxy", 
+for var in ["http_proxy", "https_proxy", "ftp_proxy", "socks_proxy",
             "HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "SOCKS_PROXY"]:
     os.environ.pop(var, None)
 
@@ -74,6 +71,7 @@ def retrieve_nodes_from_user_intents_embeddings(
 
     return results
 
+
 def build_retrieval_query(user_goal: str) -> str:
     return f"""
 PAGE_PURPOSE:
@@ -82,8 +80,6 @@ A UI page or screen for this goal: {user_goal}
 USER_INTENTS:
 {user_goal}
 """.strip()
-
-
 
 
 def get_node_depths(G):
@@ -109,6 +105,7 @@ def get_node_depths(G):
                 depths[node_id] = depth
 
     return depths
+
 
 def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
     """
@@ -155,12 +152,10 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
 
         output_lines.append(f"Final goal: {goal if goal else '(none)'}")
 
-        # Optional root id, useful when plans come from different graph roots
         root_id = plan.get("root_id")
         if root_id:
             output_lines.append(f"Root id: {str(root_id).strip()}")
 
-        # Waypoints
         waypoints = plan.get("relevant_waypoint_sequence", [])
         output_lines.append("\nRelevant waypoint sequence:")
 
@@ -170,7 +165,6 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         else:
             output_lines.append("(none)")
 
-        # Transition hints
         hints = plan.get("transition_hints", [])
         output_lines.append("\nTransition hints:")
 
@@ -186,7 +180,6 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         else:
             output_lines.append("(none)")
 
-        # Plan-specific usage instruction, if available
         usage_instruction = plan.get("usage_instruction")
         if usage_instruction:
             output_lines.append("\nPlan-specific usage instruction:")
@@ -209,9 +202,11 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
 
 def pick_candidate(candidates, screenshots_dir, user_query="", vlm_reasoning=None):
     selection = {"node_id": None}
+
     def _screenshot_path(node_id):
         path = os.path.join(screenshots_dir, f"{node_id}.jpg")
         return path if os.path.exists(path) else None
+
     def _format_caption(c):
         lines = [
             f"**{c['node_id']}**",
@@ -225,6 +220,7 @@ def pick_candidate(candidates, screenshots_dir, user_query="", vlm_reasoning=Non
         if intents:
             lines += ["", "**Intents:**"] + [f"- {i}" for i in intents[:5]]
         return "\n".join(lines)
+
     gallery_items = []
     for c in candidates:
         path = _screenshot_path(c["node_id"])
@@ -249,27 +245,28 @@ def pick_candidate(candidates, screenshots_dir, user_query="", vlm_reasoning=Non
         )
         out = gr.Textbox(label="Selected node_id", interactive=False)
         btn = gr.Button("Confirm and continue", variant="primary")
+
         def confirm(node_id):
             if not node_id:
                 raise gr.Error("Select a candidate first.")
             selection["node_id"] = node_id
             demo.close()
             return node_id
+
         btn.click(confirm, inputs=radio, outputs=out)
     demo.launch(server_name="127.0.0.1", share=False)
     return selection["node_id"]
 
+
 def get_task_prompts_dict_from_directory(input_dir):
-    input_dir = configs.get("input_dir", None)
     if input_dir is None:
         raise ValueError("input_dir is required in batch mode")
     task_directories = glob.glob(os.path.join(input_dir, "*"))
-    # we read prompts.json file in each task directory and only keep first prompt if multiple exist in a json file
     task_prompts = dict()
     for task_directory in task_directories:
         prompts_file = os.path.join(task_directory, "prompts.json")
         with open(prompts_file, "r", encoding="utf-8") as f:
-            prompts = json.load(f)['prompts']
+            prompts = json.load(f)["prompts"]
             if len(prompts) > 0:
                 task_prompts[os.path.split(task_directory)[-1]] = prompts[0]
     return task_prompts
@@ -289,20 +286,20 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
             node_id = result["node_id"]
             candidates.append({
                 "node_id": result["node_id"],
-                "page_purpose": graph.nodes[node_id]['page_purpose'],
+                "page_purpose": graph.nodes[node_id]["page_purpose"],
                 "depth": depths[node_id],
                 "score": result["score"],
-                "user_intents": node_intents[node_id]['user_intents'],
-                "ui_navigation_memory": node_intents[node_id]['ui_navigation_memory'],
+                "user_intents": node_intents[node_id]["user_intents"],
+                "ui_navigation_memory": node_intents[node_id]["ui_navigation_memory"],
             })
 
         top_k_node_ids, result = vlm_client.rerank_candidates(task_prompt, candidates, top_k=configs.top_k_retrieval_in_stage_2)
         candidates = [c for c in candidates if c["node_id"] in top_k_node_ids]
-        
+
         pick_candidate_index = getattr(configs, "pick_candidate_index", -1)
         print(f"pick_candidate_index: {pick_candidate_index}")
         if pick_candidate_index == -1:
-            selected_node_id = pick_candidate(candidates, os.path.join(configs.logs.root, "screenshots"), vlm_reasoning=result)
+            selected_node_id = pick_candidate(candidates, os.path.join(configs.logs.root, "screenshots"), user_query=task_prompt, vlm_reasoning=result)
         else:
             if not candidates:
                 raise ValueError("No candidates available to pick.")
@@ -310,7 +307,7 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
                 raise IndexError(f"pick_candidate_index {pick_candidate_index} is out of range for {len(candidates)} candidates.")
             selected_node_id = candidates[pick_candidate_index]["node_id"]
 
-        navigation_memory = node_intents[selected_node_id]['ui_navigation_memory']
+        navigation_memory = node_intents[selected_node_id]["ui_navigation_memory"]
     else:
         navigation_memory = []
 
@@ -333,10 +330,8 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
         s = time.time()
         step_result, _ = agent.step(navigation_memory, driver.take_screenshot())
         parsed = step_result[0] if isinstance(step_result, tuple) else step_result
-        
-        # Extract type (action_type), coordinate, and thought
+
         action_type = getattr(parsed, "action_type", None) or ""
-        # Prefer sent_coords, fallback to orig_coords
         coords = None
         if hasattr(parsed, "sent_coords") and parsed.sent_coords and "point" in parsed.sent_coords:
             coords = parsed.sent_coords["point"]
@@ -361,7 +356,7 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
         driver.wait()
         screenshots.append(driver.take_screenshot())
 
-    return screenshots, actions, finish_flag 
+    return screenshots, actions, finish_flag
 
 
 def visualize_actions_on_screenshots(screenshots, actions):
@@ -383,17 +378,12 @@ def visualize_actions_on_screenshots(screenshots, actions):
     num_actions = len(actions)
     annotated = [img.copy() for img in screenshots]
 
-    # Associate each action[i] with screenshot[i], NOT screenshot[i+1].
-    # This aligns the overlay correctly: the first action is on the first screenshot post-initial.
-    # Skip visualization for actions of type 'finished' or 'finish'.
     action_indices = [
         i for i in range(min(num_actions, num_screenshots))
         if str(actions[i].get("type", "")).strip().lower() not in {"finished", "finish"}
     ]
     prev_coords = None
     for i in action_indices:
-        # Overlay this action on screenshot[i]
-        # If i==0, this is the screenshot just after the *first* action
         img = annotated[i]
         act = actions[i]
 
@@ -420,9 +410,10 @@ def visualize_actions_on_screenshots(screenshots, actions):
 
     return annotated
 
+
 if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
-    
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/clock_harmony.yaml")
     args = parser.parse_args()
@@ -434,7 +425,7 @@ if __name__ == "__main__":
         data = json.load(f)
     graph = json_graph.node_link_graph(data, edges="links")
     depths = get_node_depths(graph)
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "rb") as f:
+    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
         node_intents = json.load(f)
 
     agent = build_agent(model_name=configs.agent.model_name, url=configs.agent.url, agent_settings=configs.agent.settings, debugger=dbg)
@@ -454,9 +445,7 @@ if __name__ == "__main__":
     embeddings = np.asarray(embeddings, dtype=np.float32)
     embedding_model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
 
-
-
-    if batch_mode: 
+    if batch_mode:
         if output_dir is None:
             raise ValueError("output_dir is required in batch mode")
         task_prompts = get_task_prompts_dict_from_directory(configs.input_dir)
@@ -481,7 +470,7 @@ if __name__ == "__main__":
         else:
             user_query = input("Enter your query: ")
 
-        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, vlm_client, agent, driver, dbg)
+        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, embeddings, embedding_model, vlm_client, agent, driver, dbg)
         annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
@@ -491,6 +480,3 @@ if __name__ == "__main__":
                 json.dump(actions, f)
             with open(os.path.join(output_dir, "prompt.json"), "w", encoding="utf-8") as f:
                 json.dump({"query": user_query}, f)
-
-
-
