@@ -3,16 +3,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Clock"
-    description: "The Clock app provides users with tools to manage time through alarms, timers, a stopwatch, and world clocks."
+    name: "Yelp"
+    description: "The Yelp app allows users to search for and review local businesses, such as restaurants and shops, while providing ratings, photos, and user-generated content."
 
   driver:
-    device_id: "emulator-5554"
+    device_id: "R5CTC10XL7X"
     os_name: "android"
-    appPackage: "com.google.android.deskclock"
-    appActivity: "com.android.deskclock.DeskClock"
+    appPackage: "com.yelp.android"
+    appActivity: ".home.ui.RootSingleActivity"
     skip_exploration_for_no_app_package: true
-    reset_instruction: "Go Alarm tab. (if Alarm tab is highlighted (active) you don't need to to anything just return Finish)"
+    reset_instruction: "Go to the Home tab. If already there, return finished."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -95,7 +95,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/clock"
+    root: "explored_apps/yelp"
     resume_from_checkpoint: true
 
   post_process:

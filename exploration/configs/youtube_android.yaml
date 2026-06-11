@@ -19,7 +19,7 @@ default:
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
     yibu_api_key: 'sk-caIdHUNLbUgJ4vpB3LFT2FQhpV4ELNgmL5PXBGgJq1kvLL8C'
-    use_yibu_api: true
+    use_yibu_api: false
     model_name_for_page_summary: 'qwen3.5-flash'
     screenshot_longest_side_for_element_extraction_model: 1536
     model_name_for_elements_extraction: 'qwen3.6-plus'
@@ -35,11 +35,11 @@ default:
   
   agent:
     verbose_print: false
-    url: "http://10.193.241.177:8089/v1"
+    url: "http://10.193.241.177:8091/v1"
     model_name: "mai_ui"
     settings: 
       history_n: 3
-      resize_factor: 0.5
+      resize_factor: 1.0
 
   graph:
     verbose_node_print: false

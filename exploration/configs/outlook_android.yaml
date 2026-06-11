@@ -34,14 +34,13 @@ default:
     margin_from_top_screen_to_ignore: 100
     jpeg_quality: 90
 
-  
   agent:
     verbose_print: false
-    url: "http://10.193.241.177:8089/v1"
+    url: "http://10.193.241.177:8091/v1"
     model_name: "mai_ui"
     settings: 
       history_n: 3
-      resize_factor: 0.5
+      resize_factor: 0.75
 
   graph:
     verbose_node_print: false

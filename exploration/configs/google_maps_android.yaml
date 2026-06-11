@@ -3,16 +3,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Clock"
-    description: "The Clock app provides users with tools to manage time through alarms, timers, a stopwatch, and world clocks."
+    name: "Google Maps"
+    description: "The Google Maps app helps users search places, get directions, and navigate with real-time traffic and transit information."
 
   driver:
-    device_id: "emulator-5554"
+    device_id: "ZY22LR9N8G"
     os_name: "android"
-    appPackage: "com.google.android.deskclock"
-    appActivity: "com.android.deskclock.DeskClock"
+    appPackage: "com.google.android.apps.maps"
+    appActivity: "com.google.android.maps.MapsActivity"
     skip_exploration_for_no_app_package: true
-    reset_instruction: "Go Alarm tab. (if Alarm tab is highlighted (active) you don't need to to anything just return Finish)"
+    reset_instruction: "Go to the main map view. If already there, return finished."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -95,7 +95,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/clock"
+    root: "explored_apps/google_maps"
     resume_from_checkpoint: true
 
   post_process:
