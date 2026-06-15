@@ -55,6 +55,7 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [currentQuery, setCurrentQuery] = useState("");
   const [candidatesMsgId, setCandidatesMsgId] = useState<string | null>(null);
+  const [resetToStartPage, setResetToStartPage] = useState(true);
 
   const execWsRef = useRef<WebSocket | null>(null);
 
@@ -328,10 +329,13 @@ export default function App() {
     if (navPhase !== "ready") return;
 
     setNavPhase("executing");
-    setChatMessages((m) => [...m, { id: uid(), role: "system", content: "Starting on-device navigation…" }]);
+    const resetMsg = resetToStartPage
+      ? "Starting on-device navigation (resetting to start page first)…"
+      : "Starting on-device navigation from current screen…";
+    setChatMessages((m) => [...m, { id: uid(), role: "system", content: resetMsg }]);
 
     try {
-      await executeStart(currentQuery, selectedNodeId ?? undefined);
+      await executeStart(currentQuery, selectedNodeId ?? undefined, resetToStartPage);
 
       execWsRef.current?.close();
       const ws = new WebSocket(wsUrl("/ws/execution"));
@@ -454,6 +458,8 @@ export default function App() {
                 onExecute={handleExecute}
                 onStop={handleStop}
                 selectingNodeId={selectedNodeId}
+                resetToStartPage={resetToStartPage}
+                onResetToStartPageChange={setResetToStartPage}
               />
             </div>
             <div className="hidden lg:flex items-center justify-center bg-slate-100 rounded-xl border border-slate-200 overflow-hidden min-h-[280px]">

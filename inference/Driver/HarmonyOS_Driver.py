@@ -1,6 +1,9 @@
 import json
+import os
 import re
 import subprocess
+import time
+import uuid
 from typing import Optional, Tuple
 
 import cv2
@@ -59,15 +62,24 @@ class HarmonyDriver(BaseDriver):
     def take_screenshot(self):
         if self.is_keyboard_open():
             self.back()
-        # Minimal: use hdc file recv if available; fall back to uitest screenshot.
-        remote = "/data/local/tmp/__agentnav.jpeg"
-        local = "__agentnav.jpeg"
-        self._hdc_run(["shell", "snapshot_display", "-f", remote], timeout=20)
-        self._hdc_run(["file", "recv", remote, local], timeout=30)
-        img = cv2.imread(local)
-        if img is None:
-            raise RuntimeError("Failed to read screenshot from Harmony device.")
-        return img
+        for _ in range(2):
+            tag = uuid.uuid4().hex[:8]
+            remote = f"/data/local/tmp/__agentnav_{tag}.jpeg"
+            local = f"__agentnav_{tag}.jpeg"
+            try:
+                self._hdc_run(["shell", "snapshot_display", "-f", remote], timeout=20)
+                time.sleep(0.25)
+                self._hdc_run(["file", "recv", remote, local], timeout=30)
+                if os.path.isfile(local) and os.path.getsize(local) > 100:
+                    img = cv2.imread(local, cv2.IMREAD_COLOR)
+                    if img is not None and img.size > 0:
+                        return img
+            finally:
+                try:
+                    os.remove(local)
+                except OSError:
+                    pass
+        raise RuntimeError("Failed to read screenshot from Harmony device.")
         
     def get_foreground_package(self) -> str | None:
         try:

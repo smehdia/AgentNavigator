@@ -13,6 +13,8 @@ interface Props {
   onExecute: () => void;
   onStop: () => void;
   selectingNodeId: string | null;
+  resetToStartPage: boolean;
+  onResetToStartPageChange: (v: boolean) => void;
 }
 
 function CandidateCards({
@@ -62,6 +64,45 @@ function CandidateCards({
   );
 }
 
+function Toggle({
+  checked,
+  onChange,
+  label,
+  disabled,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={`flex items-center justify-between gap-4 w-full px-3 py-2 rounded-lg border transition-colors ${
+        disabled ? "opacity-60 cursor-not-allowed" : ""
+      } ${checked ? "border-accent bg-indigo-50" : "border-slate-200 bg-white"}`}
+    >
+      <span className="text-xs font-medium text-left text-slate-700">{label}</span>
+      <span
+        aria-hidden="true"
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+          checked ? "bg-accent" : "bg-slate-300"
+        }`}
+      >
+        <span
+          className={`inline-block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+            checked ? "translate-x-5" : "translate-x-0.5"
+          }`}
+        />
+      </span>
+    </button>
+  );
+}
+
 export default function ChatPanel({
   messages,
   input,
@@ -73,6 +114,8 @@ export default function ChatPanel({
   onExecute,
   onStop,
   selectingNodeId,
+  resetToStartPage,
+  onResetToStartPageChange,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -93,6 +136,17 @@ export default function ChatPanel({
 
   return (
     <div className="flex flex-col h-full min-h-[400px] bg-white rounded-xl border border-slate-200 overflow-hidden">
+      <div className="px-3 pt-3 pb-2 border-b border-slate-100 shrink-0">
+        <Toggle
+          label="reset_to_start_page"
+          checked={resetToStartPage}
+          onChange={onResetToStartPageChange}
+          disabled={phase === "executing"}
+        />
+        <p className="text-[10px] text-slate-400 mt-1 px-1">
+          When on, resets the app to the start screen before executing navigation.
+        </p>
+      </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {messages.length === 0 && (
           <div className="text-center text-slate-400 py-12 text-sm">

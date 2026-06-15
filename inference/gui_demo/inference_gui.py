@@ -87,6 +87,7 @@ class NavigationMemoryRequest(BaseModel):
 class ExecuteStartRequest(BaseModel):
     query: str
     node_id: Optional[str] = None
+    reset_to_start_page: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +123,7 @@ class InferenceSession:
         self._execution_lock = threading.Lock()
         self._executing: bool = False
         self._stop_requested: bool = False
+        self.reset_to_start_page: bool = True
 
     def driver_settings(self) -> dict:
         d = dict(self.config.get("driver", {}))
@@ -422,7 +424,7 @@ async def ws_device(websocket: WebSocket) -> None:
     session._device_stream_active = True
     try:
         while session._device_stream_active:
-            if session.driver and session.device_connected:
+            if session.driver and session.device_connected and not session._executing:
                 try:
                     img = await asyncio.to_thread(session.driver.take_screenshot)
                     b64 = encode_image_jpeg_b64(img, quality=70)
@@ -647,6 +649,7 @@ def execute_start(body: ExecuteStartRequest) -> dict:
 
     session.current_query = query
     session.selected_node_id = node_id
+    session.reset_to_start_page = body.reset_to_start_page
     session._stop_requested = False
     return {"ok": True, "message": "Connect to /ws/execution to stream steps"}
 
@@ -704,7 +707,7 @@ async def ws_execution(websocket: WebSocket) -> None:
                 session.driver,
                 max_steps,
                 on_step,
-                True,
+                session.reset_to_start_page,
                 should_stop,
             )
         finally:
