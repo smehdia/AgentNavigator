@@ -517,17 +517,15 @@ if __name__ == "__main__":
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
     node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
-        node_intents = json.load(f)
-    node_navigation_plans = save_node_navigation_plans(
-        nx_graph, node_intents, vlm_client, configs, dbg
+    dbg.log("Stage 1 complete: node_intents.json", color="green")
+
+    save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
+    dbg.log("Stage 2 complete: node_navigation_plans.json", color="green")
+
+    add_node_embeddings_to_user_intents(
+        configs.logs.root, "graph.json", "node_intents.json", "node_intents.json"
     )
-
-
-    dbg.log("Node intents and navigation plans saved successfully", color="green")
-    dbg.log("Stage 2, save indices for Retrieval", color="green")
-
-    add_node_embeddings_to_user_intents(configs.logs.root, "graph.json", "node_intents.json", "node_intents.json")
+    dbg.log("Stage 3 complete: embeddings written to node_intents.json", color="green")
 
 
     
