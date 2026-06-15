@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/ChatPanel.tsx","./src/components/ConfigForm.tsx","./src/components/DeviceFrame.tsx","./src/components/LoadProgress.tsx","./src/components/PreparePanel.tsx","./src/components/Sidebar.tsx","./src/components/StatusCard.tsx"],"version":"5.9.3"}
