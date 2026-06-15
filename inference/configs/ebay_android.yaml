@@ -1,0 +1,43 @@
+
+default:
+
+  debug_mode: False
+
+  app:
+    name: "eBay"
+    description: "The eBay app allows users to buy and sell a wide variety of items through an online marketplace."
+
+  driver:
+    device_id: "emulator-5554"
+    os_name: "android"
+    appPackage: "com.ebay.mobile"
+    appActivity: ".home.impl.main.MainActivity"
+    skip_exploration_for_no_app_package: true
+    reset_instruction: "Go to the Home tab. If already there, return finished."
+
+  vlm:
+    alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
+    yibu_api_key: 'sk-caIdHUNLbUgJ4vpB3LFT2FQhpV4ELNgmL5PXBGgJq1kvLL8C'
+    use_yibu_api: true
+
+  agent:
+    verbose_print: false
+    url: "http://10.193.241.177:8089/v1"
+    model_name: "mai_ui"
+    settings: 
+      history_n: 3
+      resize_factor: 0.75
+    max_steps: 10
+
+  logs:
+    root: "../exploration/explored_apps/ebay"
+    resume_from_checkpoint: true
+
+  batch_mode: true
+  output_dir: "./results"
+
+  use_memory_for_navigation: true
+  query: "Navigate to the Feedback to Microsoft page."
+  top_k_in_first_stage_retrieval: 30
+  top_k_retrieval_in_stage_2: 5
+  pick_candidate_index: 0    # 0 means best candidate, 1 means second best, ... -1 means use gradio to pick candidate  (has to be less than top_k_retrieval_in_stage_2)
