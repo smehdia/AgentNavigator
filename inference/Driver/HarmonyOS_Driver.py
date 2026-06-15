@@ -193,9 +193,16 @@ class HarmonyDriver(BaseDriver):
         self._hdc_run(["shell", "uitest", "uiInput", "click", str(int(x)), str(int(y))], timeout=10)
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 500) -> None:
-        # uitest uses duration in ms via swipe
+        # uitest uiInput swipe expects swipeVelocityPps_ (px/s, 200–40000), not duration_ms.
+        distance = max(abs(int(x2) - int(x1)), abs(int(y2) - int(y1)))
+        ms = max(int(duration_ms), 1)
+        if distance > 0:
+            velocity_pps = int(round(distance / (ms / 1000.0)))
+        else:
+            velocity_pps = 600  # Harmony default for same-point gestures (e.g. long press)
+        velocity_pps = max(200, min(40000, velocity_pps))
         self._hdc_run(
-            ["shell", "uitest", "uiInput", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(int(duration_ms))],
+            ["shell", "uitest", "uiInput", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(velocity_pps)],
             timeout=15,
         )
 

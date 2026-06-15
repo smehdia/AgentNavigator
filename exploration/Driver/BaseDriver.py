@@ -207,13 +207,14 @@ class BaseDriver(ABC):
         self.run_application()
         self.wait()
         # we do one scroll up to make sure we are on top of the page
-        w, h = self.get_screen_size()
-        cx, cy = w // 2, h // 2
-        dy = int(h * 0.35)
-        self.swipe(cx, cy, cx, min(h - 1, cy + dy), duration_ms=400)
-        self.wait()
+        if not self.settings.get("skip_scroll_up_on_reset", False):
+            w, h = self.get_screen_size()
+            cx, cy = w // 2, h // 2
+            dy = int(h * 0.35)
+            self.swipe(cx, cy, cx, min(h - 1, cy + dy), duration_ms=400)
+            self.wait()
 
-
+    
         reset_instruction = self.settings.get("reset_instruction")
         if not self.agent or not reset_instruction:
             return
