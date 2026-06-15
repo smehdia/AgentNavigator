@@ -15,7 +15,7 @@ You need a completed exploration run (same `logs.root` as in your YAML) before p
 
 Follow these steps before a long run. Skipping device checks is the most common cause of bad graphs (wrong start screen, walks stopping on launcher/browser, or exploring outside the target app).
 
-> **Critical:** Every `random_walk`, BFS approach, and agent backtrack starts from **`driver.reset_to_start_page()`** (5× back → **force-stop** app → relaunch → **scroll to top** → optional agent steps). If reset does not open the **correct app** and land on a **stable start screen**, exploration will graph the wrong UI or stop immediately. **Always verify `reset_to_start_page()` end-to-end on the device** before a long `exploration_walks` run.
+> **Critical:** Every `random_walk`, BFS approach, and agent backtrack starts from **`driver.reset_to_start_page()`** (5× back → **force-stop** app → relaunch → **scroll to top** (unless `skip_scroll_up_on_reset`) → optional agent steps). If reset does not open the **correct app** and land on a **stable start screen**, exploration will graph the wrong UI or stop immediately. **Always verify `reset_to_start_page()` end-to-end on the device** before a long `exploration_walks` run.
 
 > **Highly recommended:** After editing your YAML (especially `driver.appPackage`, `driver.appActivity`, `driver.use_launcher_intent`, and `driver.reset_instruction`), run **`check_driver.py`** on the physical device **before** `explore.py`. It interactively checks launch, reset, and foreground detection — see [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy).
 
@@ -26,8 +26,8 @@ Follow these steps before a long run. Skipping device checks is the most common 
 | **App identity** | `driver.appPackage`, `driver.appActivity` | `appPackage` must match the installed app. **Android:** `appActivity` is the launcher activity (see [resolve activity](#resolve-apppackage-and-appactivity-android)). **Harmony:** `appActivity` is the **entry ability** / `mainElementName` from `bm dump` (see [resolve entry ability](#resolve-apppackage-and-appactivity-harmony)). |
 | **Launcher launch** | `driver.use_launcher_intent` or `$` in `appActivity` | **Android only.** Some apps break `am start -n pkg/activity`: YouTube (`$` stripped by shell), Outlook (foreground activity ≠ launchable component — e.g. `CentralActivity` from `topResumedActivity` fails but MAIN/LAUNCHER works). Set **`use_launcher_intent: true`** in YAML when component launch fails. Auto-enabled when `appActivity` contains `$`. |
 | **Force-close + relaunch** | `close_application()` (in reset) | **`am force-stop` / `aa force-stop`** on `appPackage` kills the process (avoids YouTube-style “minimized in Recents” after Back only). Then `run_application()` cold-starts the app. **Always verify both methods on the device** before a long run (see checklist below). |
-| **Scroll to top** | (in reset, after launch) | One centered **scroll up** swipe (~35% screen height) so feeds/lists start near the top before the agent loop. |
-| **Reset instruction** | `driver.reset_instruction` | **Required for reliable exploration.** Natural-language goal for the agent loop **after** force-stop, launch, and scroll-up. The agent must reach your canonical tab/screen and return **`finished`**. Without this, reset only relaunches the app and may leave you on the wrong tab, splash, or a dialog. |
+| **Scroll to top** | `driver.skip_scroll_up_on_reset` (default off) | After relaunch, one centered **scroll up** swipe (~35% screen height) so feeds/lists start near the top. Set **`skip_scroll_up_on_reset: true`** when the start screen is not scrollable (todo list, tab bar) and scroll-up would move away from the anchor. |
+| **Reset instruction** | `driver.reset_instruction` | **Required for reliable exploration.** Natural-language goal for the agent loop **after** force-stop, launch, and optional scroll-up. The agent must reach your canonical tab/screen and return **`finished`**. Without this, reset only relaunches the app and may leave you on the wrong tab, splash, or a dialog. |
 | **Foreground detection** | `get_foreground_package()` | When `driver.skip_exploration_for_no_app_package: true`, Walker stops the walk if foreground ≠ `appPackage`. **Test on several in-app screens** (tabs, settings, sheets) — not only right after reset. Implemented on **Android** (`dumpsys window`) and **Harmony** (`uitest dumpLayout` bundle grep). |
 
 #### Resolve `appPackage` and `appActivity` (Android)
@@ -117,7 +117,7 @@ configs = Dynaconf(settings_files=["configs/your_app.yaml"], merge_enabled=True)
 agent = build_agent(model_name=configs.agent.model_name, url=configs.agent.url, agent_settings=configs.agent.settings)
 driver = build_driver(settings=configs.driver, agent=agent)
 
-driver.reset_to_start_page()   # back ×5 → force-stop → launch → scroll up → agent until finished
+driver.reset_to_start_page()   # back ×5 → force-stop → launch → scroll up (unless skip_scroll_up_on_reset) → agent until finished
 driver.close_application()
 driver.run_application()
 assert driver.get_foreground_package() == configs.driver.appPackage
@@ -183,6 +183,7 @@ default:
 |---------|----------------|---------|
 | **`driver`** | `device_id`, `os_name`, `appPackage`, `appActivity` | Device connection and launch (**Android:** `use_launcher_intent`; **Harmony:** entry ability from `bm dump`) |
 | | `reset_instruction` | **Strongly recommended** — agent loop inside `reset_to_start_page()` (see step 1) |
+| | `skip_scroll_up_on_reset` | Skip scroll-up after relaunch when the anchor screen is not scrollable (e.g. todo list, tab bar) |
 | | `use_launcher_intent` | `true` → `am start` with MAIN/LAUNCHER + `appPackage` (for `$` in activity, e.g. YouTube) |
 | | `skip_exploration_for_no_app_package` | Stop walk when foreground leaves `appPackage` |
 | **`agent`** | `url`, `model_name`, `settings.history_n`, `settings.resize_factor` | Path-following agent for reset and agent backtrack |
@@ -968,6 +969,7 @@ driver:
 | `use_launcher_intent` | no (Android) | If `true`, Android launch uses `am start -a MAIN -c LAUNCHER -p appPackage` instead of `am start -n pkg/activity`. **Auto-enabled** when `appActivity` contains `$`. |
 | `skip_exploration_for_no_app_package` | no (default: treat as off if omitted) | When `true`, `Walker.random_walk` ends the current walk as soon as the foreground app is not `appPackage` (e.g. user opened Chrome from Help, or landed on the home launcher). See [Skip exploration outside target app](#skip-exploration-outside-target-app). |
 | `reset_instruction` | no (but **required in practice**) | Agent instruction for the loop inside `reset_to_start_page()` after force-stop, relaunch, and scroll-up; must end with `finished` on your exploration anchor screen. See [How to run → verify reset](#1-verify-the-driver--especially-reset_to_start_page). |
+| `skip_scroll_up_on_reset` | no (default: `false`) | When `true`, skip the centered scroll-up swipe after relaunch in `reset_to_start_page()`. Use for apps whose start screen is not a scrollable feed (e.g. a fixed todo list or tab bar) where scroll-up would move content away from the anchor screen. |
 
 ### `build_driver(settings, agent=None)`
 
@@ -994,7 +996,7 @@ Pass an optional `BaseAgent` instance so `reset_to_start_page()` can run agent-g
 | `get_foreground_package()` | Foreground package / bundle name from platform-specific source; used by `Walker` when `skip_exploration_for_no_app_package` is true (**Android:** `dumpsys window`; **Harmony:** `uitest dumpLayout` bundle grep) |
 | `get_app_version()` | Platform-specific app + device metadata written to `meta_info.json` at exploration start (**Harmony:** parses `bm dump -n` for version and entry ability) |
 | `click(x, y)` | Tap at device pixels |
-| `swipe(x1, y1, x2, y2, duration_ms=500)` | Swipe gesture |
+| `swipe(x1, y1, x2, y2, duration_ms=500)` | Swipe gesture (`duration_ms` on Android; Harmony converts to `swipeVelocityPps_`) |
 | `type_text(text)` | Type text into focused field |
 | `back()` | System back |
 | `home()` | System home |
@@ -1007,7 +1009,7 @@ Pass an optional `BaseAgent` instance so `reset_to_start_page()` can run agent-g
 | `wait(seconds=1.0)` | Sleep between actions |
 | `execute_action(parsed: ParsedAction) -> bool` | Map agent output to device input. Returns `False` for `finished` / unknown actions. |
 | `close_application()` | Force-stop configured app (`AndroidDriver`: `am force-stop`; `HarmonyDriver`: `aa force-stop`) |
-| `reset_to_start_page()` | 5× back → `close_application()` → `run_application()` → scroll up → optional agent loop with `reset_instruction` |
+| `reset_to_start_page()` | 5× back → `close_application()` → `run_application()` → optional scroll up (`skip_scroll_up_on_reset`) → optional agent loop with `reset_instruction` |
 
 #### Soft keyboard (`is_keyboard_open`)
 
@@ -1053,12 +1055,13 @@ wait()
 run_application()            # cold launch (Android: launcher intent if use_launcher_intent or $ in appActivity; Harmony: aa start -a appActivity -b appPackage)
 wait()
 
-# scroll content toward top (one swipe: center → downward finger, direction "up")
-w, h = get_screen_size()
-cx, cy = w // 2, h // 2
-dy = int(h * 0.35)
-swipe(cx, cy, cx, min(h - 1, cy + dy), duration_ms=400)
-wait()
+# scroll content toward top (skipped when skip_scroll_up_on_reset is true)
+if not skip_scroll_up_on_reset:
+    w, h = get_screen_size()
+    cx, cy = w // 2, h // 2
+    dy = int(h * 0.35)
+    swipe(cx, cy, cx, min(h - 1, cy + dy), duration_ms=400)
+    wait()
 
 if agent and reset_instruction:
     agent.clear_history()
@@ -1077,7 +1080,7 @@ if agent and reset_instruction:
 | 1 — Back ×5 | Leave nested UI / dialogs before killing the app |
 | 2 — `close_application()` | **Force-stop** so the app is not only minimized in Recents (important for YouTube and heavy apps) |
 | 3 — `run_application()` | Fresh process start |
-| 4 — Scroll up | Land near the **top** of scrollable home/feed before agent navigation |
+| 4 — Scroll up | Land near the **top** of scrollable home/feed before agent navigation (skipped when `skip_scroll_up_on_reset: true`) |
 | 5 — Agent loop | `reset_instruction` until `finished` (optional but required in practice) |
 | 6 — Relaunch fallback | If the agent never returns `finished`, launch once more |
 
@@ -1111,7 +1114,7 @@ Uses **`adb`** against `device_id`.
 | `get_xml_layout()` | **uiautomator2** `dump_hierarchy(compressed=True)` with retries (not raw `adb shell uiautomator dump`) |
 | `get_current_app_id()` | Parse `dumpsys window windows` for `mCurrentFocus` |
 | `click()` | `adb shell input tap x y` |
-| `swipe()` | `adb shell input swipe x1 y1 x2 y2 duration_ms` |
+| `swipe()` | `adb shell input swipe x1 y1 x2 y2 duration_ms` — 5th arg is gesture duration in **milliseconds** |
 | `type_text()` | `adb shell input text …` (spaces → `%s`) |
 | `back()` | keyevent `4` |
 | `home()` | keyevent `3` |
@@ -1140,7 +1143,7 @@ Uses **`hdc -t {device_id}`** and **uitest** commands (no adb / no hmdriver2 dep
 | `get_current_app_id()` | Parse `aa dump -a` for `bundleName` |
 | `get_app_version()` | `bm dump -n {appPackage}` → parse `versionName`, `versionCode`, `mainElementName`, `mainAbility`, module list; returns `entry.launch_command` helper for preflight |
 | `click()` | `uitest uiInput click x y` |
-| `swipe()` | `uitest uiInput swipe x1 y1 x2 y2 duration_ms` |
+| `swipe()` | `uitest uiInput swipe x1 y1 x2 y2 swipeVelocityPps_` — `BaseDriver` passes `duration_ms`; `HarmonyDriver` converts it to **velocity in px/s** (`distance / (duration_ms/1000)`, clamped 200–40000). Same-point swipes (long press) use Harmony default 600 px/s. Do **not** pass `duration_ms` directly to `uitest` — that value is interpreted as px/s and produces very slow scrolls. |
 | `type_text()` | `uitest uiInput text …` |
 | `back()` | `uitest uiInput keyEvent back` |
 | `home()` | `uitest uiInput keyEvent home` |

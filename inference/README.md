@@ -183,7 +183,7 @@ flowchart TB
 
 **Execute** (`run_navigation_loop`):
 
-1. `driver.reset_to_start_page()` (back, relaunch, optional `reset_instruction`).
+1. `driver.reset_to_start_page()` (back ×5, force-stop, relaunch, optional scroll-up unless `skip_scroll_up_on_reset`, optional `reset_instruction`).
 2. Loop up to `agent.max_steps`: screenshot → `agent.step(navigation_memory, screenshot)` → execute action until `finish` or stop.
 3. Steps stream over `WS /ws/execution` as JSON (thought, coordinates, annotated screenshot). Stop is cooperative (finishes current step, then halts).
 
@@ -245,7 +245,7 @@ Enter your query:
 1. Load the explored graph and node intents from `logs.root`.
 2. If `use_memory_for_navigation` is `true`, run two-stage retrieval, then select a target node (automatically via `pick_candidate_index`, or interactively via Gradio when `pick_candidate_index: -1`).
 3. Format navigation memory (or an empty instruction) for the agent.
-4. Reset the device to a known start screen (`driver.reset_to_start_page()`).
+4. Reset the device to a known start screen (`driver.reset_to_start_page()` — optional scroll-up unless `skip_scroll_up_on_reset`).
 5. Loop: agent observes screenshot → proposes action → driver executes until `finish` or `agent.max_steps`.
 6. Optionally save screenshots, annotated screenshots, `actions.json`, and `prompt.json` under `output_dir`.
 
@@ -293,7 +293,10 @@ Controls the device connection and app launch. Built by `Driver.factory.build_dr
 | `appActivity` | Launch activity |
 | `skip_exploration_for_no_app_package` | *(optional)* Skip work when the foreground app is not the target package |
 | `reset_instruction` | *(optional)* Natural-language instruction the agent runs after relaunch to reach a consistent tab/screen (e.g. *"Go Alarm tab..."*). If omitted, reset stops after relaunch + scroll. |
+| `skip_scroll_up_on_reset` | *(optional, default `false`)* When `true`, skip the centered scroll-up swipe after relaunch in `reset_to_start_page()`. Use when the start screen is not a scrollable feed and scroll-up would move away from the anchor (e.g. fixed todo list, tab bar). |
 | `use_launcher_intent` | *(optional, Android)* Launch via launcher intent |
+
+**Harmony swipe:** `HarmonyDriver.swipe()` accepts the same `duration_ms` argument as Android, but converts it to Harmony’s `swipeVelocityPps_` (px/s) before calling `uitest uiInput swipe`. Passing duration directly to `uitest` would be misread as velocity and produce very slow scrolls.
 
 ### `vlm`
 
@@ -585,7 +588,7 @@ If `use_memory_for_navigation` is `false`, this step receives an empty list and 
 
 ### On-device navigation loop
 
-After `driver.reset_to_start_page()` (back ×5, close app, relaunch, optional `reset_instruction`):
+After `driver.reset_to_start_page()` (back ×5, close app, relaunch, optional scroll-up unless `skip_scroll_up_on_reset`, optional `reset_instruction`):
 
 ```text
 for up to agent.max_steps:
