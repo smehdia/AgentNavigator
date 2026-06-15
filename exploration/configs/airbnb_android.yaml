@@ -99,8 +99,9 @@ default:
     resume_from_checkpoint: true
 
   post_process:
-    vlm_model_name: 'qwen3.6-plus'
-    use_yibu_api: false
+    vlm_model_name_for_node_intents: 'qwen3.6-plus'
+    vlm_model_name_for_node_navigation_plans: 'qwen3.5-flash'
+    use_yibu_api: true
     vlm_processing_img_size_for_last_screenshot: 1536
     vlm_processing_img_quality_for_last_screenshot: 90
     vlm_processing_img_size_for_other_screenshots: 1024
