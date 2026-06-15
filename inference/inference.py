@@ -64,12 +64,28 @@ def retrieve_nodes_from_user_intents_embeddings(
                 "score": float(scores[idx]),
                 "node_id": node_id,
                 "user_intents": item.get("user_intents", []),
-                "ui_navigation_memory": item.get("ui_navigation_memory", []),
                 "embedding_text": item.get("embedding_text", ""),
             }
         )
 
     return results
+
+
+def load_node_navigation_plans(logs_root: str) -> dict:
+    """Load per-node navigation plans from node_navigation_plans.json."""
+    path = os.path.join(logs_root, "node_navigation_plans.json")
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def get_ui_navigation_memory_for_node(node_navigation_plans: dict, node_id: str) -> list:
+    nav_entry = node_navigation_plans.get(node_id, {})
+    if isinstance(nav_entry, dict):
+        return nav_entry.get("ui_navigation_memory", []) or []
+    return []
 
 
 def build_retrieval_query(user_goal: str) -> str:
@@ -137,10 +153,14 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
 
     output_lines.append("[Navigation Memory]")
     output_lines.append(
-        "There may be multiple alternative navigation plans, possibly generated from different roots. "
+        "There are at most 3 semantically distinct navigation plans to reach the target screen. "
         "Before acting, compare the current screenshot with the waypoint sequences and transition hints, "
         "then follow the plan that best matches the current screen. "
-        "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan."
+        "Do not use root ids; match by visible UI state only. "
+        "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan. "
+        "All plans assume you start on the reset landing screen unless the screenshot clearly shows a blocker "
+        "(incognito, dialog, wrong tab). Ignore leading waypoints that don't match if you are already on the "
+        "shared landing screen."
     )
 
     for idx, plan in enumerate(navigation_memory_plans, 1):
@@ -151,10 +171,6 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         goal = goal.strip() if isinstance(goal, str) else ""
 
         output_lines.append(f"Final goal: {goal if goal else '(none)'}")
-
-        root_id = plan.get("root_id")
-        if root_id:
-            output_lines.append(f"Root id: {str(root_id).strip()}")
 
         waypoints = plan.get("relevant_waypoint_sequence", [])
         output_lines.append("\nRelevant waypoint sequence:")
@@ -272,7 +288,7 @@ def get_task_prompts_dict_from_directory(input_dir):
     return task_prompts
 
 
-def execute_single_task(task_prompt, configs, graph, depths, node_intents, embeddings, embedding_model, vlm_client, agent, driver, dbg):
+def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg):
 
     if configs.use_memory_for_navigation:
         results = retrieve_nodes_from_user_intents_embeddings(
@@ -284,13 +300,14 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
         candidates = []
         for result in results:
             node_id = result["node_id"]
+            node_entry = node_intents.get(node_id, {})
             candidates.append({
                 "node_id": result["node_id"],
                 "page_purpose": graph.nodes[node_id]["page_purpose"],
                 "depth": depths[node_id],
                 "score": result["score"],
-                "user_intents": node_intents[node_id]["user_intents"],
-                "ui_navigation_memory": node_intents[node_id]["ui_navigation_memory"],
+                "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
+                "ui_navigation_memory": get_ui_navigation_memory_for_node(node_navigation_plans, node_id),
             })
 
         top_k_node_ids, result = vlm_client.rerank_candidates(task_prompt, candidates, top_k=configs.top_k_retrieval_in_stage_2)
@@ -307,7 +324,7 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, embed
                 raise IndexError(f"pick_candidate_index {pick_candidate_index} is out of range for {len(candidates)} candidates.")
             selected_node_id = candidates[pick_candidate_index]["node_id"]
 
-        navigation_memory = node_intents[selected_node_id]["ui_navigation_memory"]
+        navigation_memory = get_ui_navigation_memory_for_node(node_navigation_plans, selected_node_id)
     else:
         navigation_memory = []
 
@@ -415,7 +432,7 @@ if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/clock_harmony.yaml")
+    parser.add_argument("--config", type=str, default="configs/clock_android.yaml")
     args = parser.parse_args()
 
     configs = Dynaconf(settings_files=[args.config], merge_enabled=True)
@@ -427,6 +444,7 @@ if __name__ == "__main__":
     depths = get_node_depths(graph)
     with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
         node_intents = json.load(f)
+    node_navigation_plans = load_node_navigation_plans(configs.logs.root)
 
     agent = build_agent(model_name=configs.agent.model_name, url=configs.agent.url, agent_settings=configs.agent.settings, debugger=dbg)
     driver = build_driver(settings=configs.driver, agent=agent)
@@ -452,7 +470,7 @@ if __name__ == "__main__":
 
         for task_name, task_prompt in task_prompts.items():
             os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}"), exist_ok=True)
-            screenshots, actions, finish_flag = execute_single_task(task_prompt, configs, graph, depths, node_intents, embeddings, embedding_model, vlm_client, agent, driver, dbg)
+            screenshots, actions, finish_flag = execute_single_task(task_prompt, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
             annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
             for i, screenshot in enumerate(annotated_screenshots):
                 os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "annotated_screenshots"), exist_ok=True)
@@ -470,7 +488,7 @@ if __name__ == "__main__":
         else:
             user_query = input("Enter your query: ")
 
-        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, embeddings, embedding_model, vlm_client, agent, driver, dbg)
+        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
         annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
