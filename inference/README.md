@@ -4,54 +4,59 @@ Run a natural-language navigation goal on a **physical device** using an explore
 
 **Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `node_intents.json`, `node_navigation_plans.json`, and `screenshots/`.
 
+**Recommended for demos:** use the [Inference GUI](#inference-gui-demo-wizard) (`run_gui.sh`) — a browser wizard that walks through config, device checks, retrieval, and on-device navigation. For scripted or batch runs, use the [CLI](#quick-start-cli) (`inference.py`).
+
 ---
 
 ## Inference GUI (demo wizard)
 
-A **React + FastAPI** web UI for live demos: configure the run, verify agent/device, preview the phone, then drive the full retrieval → selection → navigation loop from a single chat panel.
+A **React + FastAPI** web UI for live demos: pick an app config, verify agent and device, preview the phone, then run the full **retrieval → candidate pick → navigation** loop from a chat panel.
 
-All GUI code lives under [`gui_demo/`](gui_demo/):
+The GUI reuses the same retrieval and navigation logic as [`inference.py`](inference.py), factored into [`gui_demo/pipeline.py`](gui_demo/pipeline.py). The CLI script does not depend on `gui_demo/`.
+
+### Layout
 
 ```text
 inference/
-├── run_gui.sh            # Convenience launcher
+├── run_gui.sh              # Recommended launcher (build frontend + start server)
 └── gui_demo/
-    ├── inference_gui.py  # FastAPI backend (REST + WebSockets)
-    ├── pipeline.py       # Retrieval / navigation helpers used by the GUI
+    ├── inference_gui.py    # FastAPI backend (REST + WebSockets + static UI)
+    ├── pipeline.py         # load_artifacts, run_retrieval, run_navigation_loop
     ├── requirements-gui.txt
-    └── web/              # React + Vite frontend
-        ├── src/
-        └── dist/         # Production build (served by FastAPI)
+    └── web/                # React + Vite frontend
+        ├── src/            # Source (committed)
+        └── dist/           # Production build (gitignored; built by run_gui.sh)
 ```
 
-The CLI script [`inference.py`](inference.py) is unchanged and does not depend on `gui_demo/`.
+### What you need before running
 
-### Prerequisites
+| Requirement | Notes |
+|-------------|--------|
+| **Exploration artifacts** | Under `logs.root` in your config: `graph.json`, `node_intents.json`, `node_navigation_plans.json`, `screenshots/{node_id}.jpg` |
+| **Python env** | Same env as CLI inference (FlagEmbedding, dynaconf, dashscope, OpenCV, etc.) |
+| **GUI extras** | `pip install -r gui_demo/requirements-gui.txt` (FastAPI, uvicorn, PyYAML) |
+| **Node.js 18+** | For `npm install` / `npm run build` in `gui_demo/web/` |
+| **ADB device** | Emulator or physical device visible in `adb devices` |
+| **Agent server** | MAI-UI or UI-TARS at the `agent.url` in config (default port `8089`) |
 
-Same as CLI inference, plus:
-
-- **Python env** — the conda/venv you use for `inference.py` (FlagEmbedding, dynaconf, dashscope, etc.)
-- **Node.js 18+** — to build the frontend (`npm`)
-- **Device** — Android emulator or physical device on ADB (`adb devices`)
-- **Agent server** — MAI-UI or UI-TARS at the URL in config
-- **Exploration artifacts** under `logs.root`: `graph.json`, `node_intents.json`, `node_navigation_plans.json`, `screenshots/`
+Pick or edit a config under `inference/configs/` (e.g. `outlook_android.yaml`). Set `driver.device_id`, `logs.root` (path to explored app output), and API keys before the demo.
 
 ### One-time setup
 
-From the `inference/` directory, with your inference Python env active:
+From the `inference/` directory with your Python env active:
 
 ```bash
 cd inference
 
-# Extra GUI Python packages
+# GUI Python packages
 pip install -r gui_demo/requirements-gui.txt
 
-# Frontend build (unset proxy if npm hangs)
+# Frontend dependencies (unset proxy if npm hangs)
 unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
-cd gui_demo/web && npm install && npm run build
+cd gui_demo/web && npm install && cd ../..
 ```
 
-Re-run `npm run build` in `gui_demo/web/` after any frontend changes.
+You only need `npm install` once (or after `package.json` changes). **`run_gui.sh` runs `npm run build` automatically** on every start so `web/dist/` is up to date.
 
 ### Run (recommended)
 
@@ -60,21 +65,27 @@ cd inference
 bash run_gui.sh
 ```
 
-Open [http://localhost:8765](http://localhost:8765).
+Then open **[http://localhost:8765](http://localhost:8765)**.
 
-`run_gui.sh` clears common proxy env vars and starts uvicorn from the correct directory.
+`run_gui.sh`:
 
-### Run (manual)
+1. `cd`s to `inference/` (so imports resolve).
+2. Unsets common proxy env vars (avoids npm/curl issues).
+3. Runs `npm run build` in `gui_demo/web/`.
+4. Starts `uvicorn gui_demo.inference_gui:app --host 0.0.0.0 --port 8765`.
 
-**Demo / single port** (serves the built React app from `gui_demo/web/dist/`):
+### Run (manual / development)
+
+**Production (single port)** — serve built React from `web/dist/`:
 
 ```bash
 cd inference
-unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy   # optional
+cd gui_demo/web && npm run build && cd ../..
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
 uvicorn gui_demo.inference_gui:app --host 0.0.0.0 --port 8765
 ```
 
-**Development** (hot-reload frontend, two terminals):
+**Development (hot-reload frontend, two terminals):**
 
 ```bash
 # Terminal 1 — API
@@ -86,51 +97,135 @@ cd inference/gui_demo/web
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173) for dev, or [http://localhost:8765](http://localhost:8765) for the production build.
+Open [http://localhost:5173](http://localhost:5173) for dev, or [http://localhost:8765](http://localhost:8765) after a production build.
 
-### Wizard (5 steps)
+### Wizard: what to do (5 steps)
 
-| Step | What you do |
-|------|-------------|
-| **1. Configure** | Review/edit settings loaded from `configs/outlook_android.yaml` (device, agent URL, VLM keys, `logs.root`, retrieval toggles). Click **Apply Config**. |
-| **2. Checks** | **Run Checks** — verifies agent server (`/v1/models`) and device (ADB/HDC). Both must pass. |
-| **3. Device** | **Connect to Device** — launches the app and starts a live screenshot stream. |
-| **4. Load** | **Load Resources** — loads graph, node intents, BGE-M3, VLM client, and agent into memory (first BGE load can take ~30s). |
-| **5. Navigate** | Full inference flow in one chat panel (see below). |
+Complete each step in order; later steps stay locked until the previous one succeeds.
 
-Later steps unlock only after the previous step succeeds.
+| Step | UI action | What happens on the backend |
+|------|-----------|---------------------------|
+| **1. Configure** | Pick a config from the dropdown (all `configs/*.yaml`), edit fields if needed, click **Apply Config** | `POST /api/config/select` or `PUT /api/config` loads YAML into server session; relative `logs.root` is resolved from `inference/` |
+| **2. Checks** | Click **Run Checks** | `POST /api/checks/run` — curls agent `GET /v1/models`; runs `driver.check_device()` and reports foreground package |
+| **3. Device** | Click **Connect to Device** | `POST /api/device/connect` — builds driver, launches app; `WS /ws/device` streams live JPEG screenshots (~1.5s interval) |
+| **4. Load** | Click **Load Resources** | `GET /api/resources/load/stream` (SSE) loads graph, intents, navigation plans, BGE-M3, VLM, and agent |
+| **5. Navigate** | Chat panel: prompt → pick candidate → **Execute** | `POST /api/retrieve` → `POST /api/select-node` → `WS /ws/execution` streams agent steps |
 
-### Navigate step (chat flow)
+**Typical demo flow**
 
-Everything after resource load happens in the **Navigate** chat:
+1. Start `bash run_gui.sh` and open the browser.
+2. **Configure** — select e.g. `outlook_android`, confirm `logs.root` points to your explored app folder, **Apply**.
+3. **Checks** — ensure agent and device both pass (fix `device_id` / agent URL if not).
+4. **Device** — connect; confirm live preview shows the app.
+5. **Load** — wait for all progress items (first BGE-M3 load can take ~30s).
+6. **Navigate** — type a goal (e.g. *Navigate to the Feedback to Microsoft page.*), **Send**.
+7. If `use_memory_for_navigation` is on: review **candidate cards** (exploration screenshots + scores), tap the best match.
+8. Read the **navigation memory** message, then click **Execute**.
+9. Watch **step stream** (thought + annotated screenshot per action). Use **Stop Navigation** to halt after the current step.
+10. Send another prompt to run again without reloading resources.
 
-1. **Prompt** — type a goal (e.g. *Navigate to the Feedback to Microsoft page.*) and **Send**.
-2. **Candidates** — if `use_memory_for_navigation` is on, top retrieval hits appear as inline cards in the chat. Tap the best match.
-3. **Memory** — formatted navigation memory for the selected node appears as the next assistant message.
-4. **Execute** — click **Execute** in the chat footer to reset the device and run the agent loop.
-5. **Steps** — each action (thought + annotated screenshot) streams into the chat. Use **Stop Navigation** to halt after the current step.
-6. **Repeat** — when finished or stopped, send a new prompt to run again.
+If `use_memory_for_navigation` is **off**, steps 7–8 are skipped: **Execute** is offered right after the prompt and the agent relies on the screenshot + goal only.
 
-If memory navigation is **off**, steps 2–3 are skipped and **Execute** is offered right after the prompt.
+On wide screens, a live device preview panel sits beside the chat during execution.
 
-On wide screens, a live device preview panel appears beside the chat during execution.
+### How it works (logic)
+
+```mermaid
+flowchart TB
+  subgraph ui["React UI (gui_demo/web)"]
+    W1[Configure]
+    W2[Checks]
+    W3[Device preview WS]
+    W4[Load SSE]
+    W5[Chat: retrieve / execute WS]
+  end
+
+  subgraph api["FastAPI (inference_gui.py)"]
+    S[InferenceSession]
+    W1 --> S
+    W2 --> S
+    W3 --> S
+    W4 --> S
+    W5 --> S
+  end
+
+  subgraph pipe["pipeline.py — same ideas as inference.py"]
+    LA[load_artifacts]
+    RR[run_retrieval]
+    FN[format_navigation_plan]
+    NL[run_navigation_loop]
+  end
+
+  W4 --> LA
+  W5 --> RR --> FN --> NL
+  NL --> Agent[MAI-UI / UI-TARS]
+  NL --> Driver[Android driver]
+```
+
+**Session state** — one in-memory `InferenceSession` holds config, driver, agent, loaded artifacts (`RetrievalContext`), retrieval candidates, selected `node_id`, and execution flags. Changing config clears runtime state.
+
+**Load resources** (`load_artifacts` in `pipeline.py`):
+
+1. `graph.json` → NetworkX graph + per-node **depth** (shortest hop from nearest root).
+2. `node_intents.json` → `user_intents`, `embedding` vectors, `enhanced_page_summary`.
+3. `node_navigation_plans.json` → per-node `ui_navigation_memory` (clustered route plans from post-process Stage 2).
+4. BGE-M3 model loaded for query encoding at retrieval time.
+5. `VLM` client for stage-2 reranking.
+6. Agent client connected to `agent.url`.
+
+**Retrieve** (when `use_memory_for_navigation: true`):
+
+1. **Stage 1** — encode the user query with BGE-M3; cosine-search against precomputed node embeddings; keep top `top_k_in_first_stage_retrieval`.
+2. **Stage 2** — `VLM.rerank_candidates` with `page_purpose`, depth, scores, and `user_intents`; keep top `top_k_retrieval_in_stage_2`.
+3. Return candidate cards with exploration screenshots (`GET /api/screenshots/{node_id}`).
+
+**Navigation memory** — for the selected node, `get_ui_navigation_memory_for_node` reads plans from `node_navigation_plans.json`, then `format_navigation_plan` builds the text prompt (waypoints + transition hints) passed to the agent.
+
+**Execute** (`run_navigation_loop`):
+
+1. `driver.reset_to_start_page()` (back, relaunch, optional `reset_instruction`).
+2. Loop up to `agent.max_steps`: screenshot → `agent.step(navigation_memory, screenshot)` → execute action until `finish` or stop.
+3. Steps stream over `WS /ws/execution` as JSON (thought, coordinates, annotated screenshot). Stop is cooperative (finishes current step, then halts).
+
+This mirrors CLI `inference.py` except candidate selection is **interactive** (tap a card) instead of `pick_candidate_index` or Gradio.
+
+### API surface (reference)
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/configs` | List available YAML configs |
+| `POST /api/config/select` | Load config by id (e.g. `outlook_android`) |
+| `PUT /api/config` | Apply edited config JSON |
+| `POST /api/checks/run` | Agent + device health |
+| `POST /api/device/connect` | Launch app on device |
+| `WS /ws/device` | Live device screenshot stream |
+| `GET /api/resources/load/stream` | SSE progress while loading artifacts |
+| `POST /api/retrieve` | Run embedding + VLM retrieval for a query |
+| `POST /api/select-node` | Set selected target `node_id` |
+| `POST /api/navigation-memory` | Preview formatted navigation prompt |
+| `POST /api/execute/start` | Arm execution (then open execution WebSocket) |
+| `POST /api/execute/stop` | Request cooperative stop |
+| `WS /ws/execution` | Stream navigation steps |
 
 ### GUI troubleshooting
 
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError: No module named 'gui_demo'` | Run uvicorn from `inference/`, not the repo root. Or use `bash run_gui.sh`. |
-| `npm install` hangs | Unset proxy env vars (see one-time setup) or run `npm install --proxy=null --https-proxy=null`. |
-| Blank page at `:8765` | Build the frontend: `cd gui_demo/web && npm run build`. |
-| Agent check fails | Confirm agent URL in config; test with `curl -sSf http://HOST:8089/v1/models`. |
-| Device check fails | Run `adb devices`; update `driver.device_id` in config. |
-| Load fails on graph/intents | Check `logs.root` path and that post-processing completed. |
-| No candidate cards | Set `use_memory_for_navigation: true` in config; ensure embeddings exist in `node_intents.json`. |
-| Stop does not interrupt instantly | Stop is cooperative — it finishes the current agent step, then halts. |
+| `ModuleNotFoundError: No module named 'gui_demo'` | Run from `inference/`, not repo root. Use `bash run_gui.sh`. |
+| `npm run build` fails or hangs | Unset proxy env vars; run `npm install` in `gui_demo/web/` first. |
+| Blank page at `:8765` | Build failed or `web/dist/` missing — check `run_gui.sh` output. |
+| Agent check fails | Confirm `agent.url`; test `curl -sSf http://HOST:8089/v1/models`. |
+| Device check fails | Run `adb devices`; set `driver.device_id` in config. |
+| Load fails on graph/intents | Verify `logs.root` and that exploration + post-process completed. |
+| Load fails on navigation plans | Ensure `node_navigation_plans.json` exists under `logs.root`. |
+| No candidate cards | Set `use_memory_for_navigation: true`; ensure `embedding` fields exist in `node_intents.json`. |
+| Stop does not interrupt instantly | Stop is cooperative — finishes the current agent step, then halts. |
 
 ---
 
 ## Quick start (CLI)
+
+For interactive demos, prefer the [GUI](#inference-gui-demo-wizard) (`bash run_gui.sh`). Use the CLI for scripted runs, batch evaluation, or Gradio candidate picking (`pick_candidate_index: -1`).
 
 From the `inference/` directory:
 
@@ -549,5 +644,6 @@ Device control and agents are provided under `Driver/` and `Agents/` in this dir
 
 ## Related docs
 
-- [Exploration README](../exploration/README.md) — how `graph.json` and `node_intents.json` are produced
+- [Exploration README](../exploration/README.md) — how `graph.json`, `node_intents.json`, and `node_navigation_plans.json` are produced
+- GUI launcher: [`run_gui.sh`](run_gui.sh) · backend: [`gui_demo/inference_gui.py`](gui_demo/inference_gui.py) · pipeline: [`gui_demo/pipeline.py`](gui_demo/pipeline.py)
 - Config templates: `inference/configs/*.yaml`
