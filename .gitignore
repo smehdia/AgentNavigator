@@ -38,3 +38,5 @@ temp_*
 */inference/*.jpeg
 **/*/inference/*.jpeg
 **/**/*/inference/*.jpeg
+inference/gui_demo/web/node_modules/
+inference/gui_demo/web/dist/
