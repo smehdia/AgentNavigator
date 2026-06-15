@@ -226,6 +226,30 @@ class VLM_Yibu:
             )
             set_log_dir(log_dir)
 
+    def _post_process_model_for_node_intents(self) -> str:
+        post_process = self.configs.post_process
+        model = (
+            getattr(post_process, "vlm_model_name_for_node_intents", None)
+            or getattr(post_process, "vlm_model_name", None)
+        )
+        if not model:
+            raise ValueError(
+                "post_process.vlm_model_name_for_node_intents or post_process.vlm_model_name must be set"
+            )
+        return str(model).strip()
+
+    def _post_process_model_for_node_navigation_plans(self) -> str:
+        post_process = self.configs.post_process
+        model = (
+            getattr(post_process, "vlm_model_name_for_node_navigation_plans", None)
+            or getattr(post_process, "vlm_model_name", None)
+        )
+        if not model:
+            raise ValueError(
+                "post_process.vlm_model_name_for_node_navigation_plans or post_process.vlm_model_name must be set"
+            )
+        return str(model).strip()
+
     @staticmethod
     def _dashscope_messages_to_openai(messages: list) -> list:
         openai_messages = []
@@ -1540,14 +1564,15 @@ class VLM_Yibu:
         Input:
             path: {
                 "screenshots": [...],
-                "page_summaries": [...],
+                "enhanced_page_summaries": [...],
                 "actions": [...]
             }
             out_edges: outgoing edges/descriptions from the final node
 
         Output:
             {
-                "user_intents": [...]
+                "user_intents": [...],
+                "enhanced_page_summary": {...}
             }
         """
         def clean_actions(actions):
@@ -1612,7 +1637,7 @@ class VLM_Yibu:
     Outgoing actions are only possible next actions from the final page.
 
     Task:
-    Generate only user_intents for the FINAL ACTIVE SURFACE.
+    Generate user_intents and enhanced_page_summary for the FINAL ACTIVE SURFACE.
 
     Core interpretation rules:
     - Focus primarily on the FINAL screenshot/state.
@@ -1671,13 +1696,53 @@ class VLM_Yibu:
     - user_intents must remain one single ranked list.
     - user_intents must not include destination-specific intents requiring an outgoing edge.
 
+    Enhanced page summary rules:
+    - enhanced_page_summary describes the FINAL ACTIVE SURFACE for downstream navigation-memory generation.
+    - Base it primarily on the FINAL screenshot; use the provided compact page summary only as a starting hint.
+    - Include navigation-useful visual anchors: selected tabs, header/footer regions, prominent icons, list vs form layout, and open overlays.
+    - tag is a short page label of at most 5 words for waypoint naming and navigation memory.
+    - If the FINAL screenshot shows a clear page title, toolbar title, dialog title, header label, or selected settings row title, use that text as tag (trimmed to 5 words max).
+    - If no clear title is visible, assign a concise tag from the page content, active tab/subtab, and available actions, such as "settings", "sleep settings", or "alarm list".
+    - tag must be a short noun phrase, not a sentence; do not include verbs like "go to" or "open".
+    - active_tab, active_subtab, and page_purpose should refine the compact summary when the screenshot supports it; use null for unclear tabs/subtabs.
+    - screen_type should be a short label such as main_tab, settings_list, modal, dialog, form, detail_page, picker, or search_overlay.
+    - selected_navigation should describe the currently selected tab, filter, section, or active navigation state.
+    - visual_landmarks should list 2-6 short phrases naming stable visual cues an agent can match on screen.
+    - regions should briefly describe top_bar, main_area, and bottom_nav when visible; use empty strings for absent regions.
+    - salient_controls should list up to 8 important tappable controls with label, rough region, and role.
+    - Do not output coordinates, bounding boxes, node ids, or overlay annotation colors.
+
     Return valid JSON only with exactly this schema:
     {
     "user_intents": [
         "..."
-    ]
+    ],
+    "enhanced_page_summary": {
+        "tag": "string",
+        "active_tab": "string or null",
+        "active_subtab": "string or null",
+        "page_purpose": "string",
+        "screen_type": "string",
+        "selected_navigation": "string",
+        "visual_landmarks": ["string"],
+        "regions": {
+            "top_bar": "string",
+            "main_area": "string",
+            "bottom_nav": "string"
+        },
+        "salient_controls": [
+            {
+                "label": "string",
+                "region": "string",
+                "role": "string"
+            }
+        ]
+    }
     }
     """.strip()
+
+        path_summaries = path.get("enhanced_page_summaries") or path.get("page_summaries") or []
+        compact_final_summary = path_summaries[-1] if path_summaries else ""
 
         user_prompt = f"""
     You are given one visual navigation path to a FINAL mobile app page/state.
@@ -1691,8 +1756,8 @@ class VLM_Yibu:
     - Earlier screenshots are lower-resolution route context only.
     - Some screenshots contain visualized action annotations showing the action taken from that page.
     - These annotations are not app UI content; use them only to understand the route.
-    - page_summaries and actions are ordered from the start page to the final state.
-    - actions[i] describes the transition from page_summaries[i] to page_summaries[i + 1].
+    - enhanced_page_summaries and actions are ordered from the start page to the final state.
+    - actions[i] describes the transition from enhanced_page_summaries[i] to enhanced_page_summaries[i + 1].
 
     Critical active-surface instruction:
     - In the FINAL screenshot, first identify the topmost active UI surface.
@@ -1712,8 +1777,11 @@ class VLM_Yibu:
     - outgoing_actions are NOT necessarily the main purpose of the final state.
     - Do NOT include destination-specific intents that require taking an outgoing edge.
 
-    Ordered page summaries:
-    {path["page_summaries"]}
+    Ordered enhanced page summaries along the path:
+    {json.dumps(path_summaries, ensure_ascii=False)}
+
+    Compact page summary for the FINAL state (enrich this into enhanced_page_summary):
+    {compact_final_summary}
 
     Ordered action descriptions used to reach the final state:
     {clean_actions(path["actions"])}
@@ -1724,12 +1792,14 @@ class VLM_Yibu:
     Generate JSON for the FINAL ACTIVE SURFACE only.
 
     Output requirements:
-    - Return only user_intents.
+    - Return user_intents and enhanced_page_summary.
     - user_intents must be one ranked list only.
     - user_intents must be complete natural-language sentences.
     - For page-like states, form states, and settings states, user_intents must be destination-style navigation goals.
     - Do NOT generate direct control-operation intents unless the control is the topmost active picker/dialog/menu/focused panel.
     - Do NOT include destination-specific intents that require taking an outgoing edge.
+    - enhanced_page_summary must describe only the FINAL ACTIVE SURFACE.
+    - tag must be at most 5 words and suitable for use as a waypoint name in a navigation plan.
     - Do not output coordinates, bounding boxes, node ids, raw edge dictionaries, visual overlay descriptions, or usage instructions.
 
     Return JSON only.
@@ -1792,7 +1862,7 @@ class VLM_Yibu:
         ]
 
         response = self._multimodal_conversation_call(
-            model=self.configs.post_process.vlm_model_name,
+            model=self._post_process_model_for_node_intents(),
             messages=messages,
             response_format={"type": "json_object"},
             vl_high_resolution_images=True,
@@ -1815,7 +1885,8 @@ class VLM_Yibu:
         output = parse_json_from_model_response(raw_text)
 
         return {
-            "user_intents": output.get("user_intents", [])
+            "user_intents": output.get("user_intents", []),
+            "enhanced_page_summary": output.get("enhanced_page_summary", {}),
         }
 
 
@@ -1831,20 +1902,20 @@ class VLM_Yibu:
                 dict[root_id -> path]
             where each path has:
                 {
-                    "page_summaries": [...],
+                    "enhanced_page_summaries": [...],
                     "actions": [...]
                 }
 
         Output:
             [
                 {
-                    "root_id": root_id,
+                    "root_ids": [...],
                     "ui_navigation_memory": {
                         "relevant_waypoint_sequence": [...],
                         "transition_hints": [...]
                     }
                 },
-                ...
+                ...  (at most 3 clustered plans)
             ]
         """
         def clean_actions(actions):
@@ -1877,38 +1948,98 @@ class VLM_Yibu:
     You are a precise mobile UI navigation-memory generator.
 
     You are given one or more in-app navigation paths represented only by:
-    - ordered page summaries
+    - ordered enhanced page summaries (tag, landmarks, regions, salient controls)
     - ordered action descriptions between consecutive pages
 
+    IMPORTANT runtime assumption:
+    At inference time the agent always starts from a reset landing screen (app relaunched to a
+    canonical home/main tab). The agent is ALREADY on that shared landing unless the screenshot
+    shows a blocker (incognito overlay, dialog, permission sheet, wrong tab, etc.).
+    Navigation plans must be written for that runtime, NOT for replaying exploration roots.
+
     Task:
-    Generate compact route memory for each path.
+    Cluster the input paths and generate at most 3 compact route-memory plans total.
+    Do NOT emit one plan per root.
 
-    Do NOT generate user_intents.
-    Do NOT infer new page purposes beyond the provided page summaries.
-    Do NOT include app launch, phone home screen, or OS-level states.
-    Do NOT include coordinates, node ids, screenshots, raw edge dictionaries, visual overlay descriptions, or usage instructions.
+    Clustering rules:
+    - Cluster by the ROUTE AFTER paths converge on the same shared landing/main screen, not by
+      which exploration root_id each path started from.
+    - Merge paths when they share the same post-landing waypoint suffix and the same navigation
+      actions after the shared landing (prefer tag fields from enhanced_page_summaries).
+    - Do NOT create separate plans only because exploration started in incognito, on a dialog,
+      on a permission overlay, on a filter-strip variant of home, or on a slightly different
+      home-feed label. Those are recovery differences, not distinct routes.
+    - Keep separate plans ONLY when the post-landing route truly diverges (e.g. reaches the
+      target via You tab vs Library tab, or via Settings vs a deep link path).
+    - Return at most 3 navigation plans total.
+    - Every input root_id must appear in exactly one plan's root_ids list.
+    - Do not omit any input root_id.
 
-    For each path, generate:
+    For each clustered plan, generate:
+    - root_ids: all input roots belonging to this cluster
     - relevant_waypoint_sequence
     - transition_hints
 
+    Do NOT generate user_intents.
+    Do NOT infer new page purposes beyond the provided enhanced page summaries.
+    Do NOT include app launch, phone home screen, or OS-level states.
+    Do NOT include coordinates, node ids, screenshots, raw edge dictionaries, visual overlay descriptions, or usage instructions.
+
     Rules for relevant_waypoint_sequence:
     - Use semantic page/state names, not raw actions.
-    - The final waypoint must be the final page/state from the last page summary.
-    - The first waypoint should be the earliest relevant in-app screen from the provided path.
+    - Prefer each page's tag field from enhanced_page_summaries when available; combine with
+      active_tab when needed for clarity (e.g. "Home feed" not "YouTube Home" vs "YouTube Home Feed").
+    - The final waypoint must be the final page/state from the last enhanced page summary.
+    - Do NOT include the shared reset landing screen (main tab / home feed) as a waypoint if all
+      paths pass through it before the first meaningful navigation action.
+    - Start waypoints at the first screen where the agent must take an action toward the target
+      (e.g. start at "You" or "Settings", not "Home feed").
+    - Never use exploration-only entry states as waypoints: incognito mode, splash screens, dialogs,
+      permission overlays, or "open app" states belong in transition_hints as optional recovery
+      steps, NOT in relevant_waypoint_sequence.
     - Never include "Open app", "Launch app", "Phone home screen", or OS-level states.
-    - Every waypoint must be inside the same app.
-    - Every waypoint must move toward the final page/state.
+    - Never repeat the same waypoint consecutively.
+    - Every waypoint must be inside the same app and move toward the final page/state.
     - Remove duplicate pages, loops, retries, and backtracking.
     - Do not include child-page detours if the final page is a parent page.
     - The waypoint sequence should describe how to reach the final page/state, not what can be done after reaching it.
+    - Omit parent/category waypoints that the path never visibly lands on. If the path reaches the
+      target via a specific list row or deep link (e.g. tap "Your Addresses"), do NOT insert a
+      generic parent waypoint (e.g. "Account settings") unless that parent screen is actually shown.
+    - Each waypoint must correspond to a distinct visible screen the agent lands on after an action.
+      Do not invent intermediate waypoints from graph labels that do not match the tapped control
+      or visible screen title.
 
     Rules for transition_hints:
-    - Convert action descriptions into robust agent instructions.
-    - Mention rough stable regions only if useful, such as top-right menu, bottom tab, settings list, search field, modal, or bottom sheet.
-    - Mention scrolling only when genuinely needed to reveal the next target.
-    - If the path contains "scroll then click X", rewrite it as:
-    "Look for X in the list; scroll or swipe if it is not visible."
+    - transition_hints are a COMPLETE ordered replay of EVERY navigation action in the input path
+      (tap, scroll, swipe, back if needed). Do not skip, merge away, or summarize away any action.
+      The number of hints may be GREATER than the number of waypoints because scroll/swipe steps
+      often occur on the same screen and do not create new waypoints.
+    - Before returning JSON, verify: every action in the path (by type + description) is represented
+      by at least one hint in the same order. If an action is missing, add the hint.
+    - Every input action with type scroll or swipe MUST appear in transition_hints — either as its
+      own hint or clearly embedded in an adjacent hint. Never silently drop scroll/swipe steps.
+    - For each scroll/swipe hint, state: direction (up/down/left/right), region (main list,
+      settings list, filter strip, carousel, feed, bottom sheet), and purpose (what target or
+      next waypoint it helps reveal).
+    - For tap/click actions, use the EXACT control label from the action description (button text,
+      list row title, tab name, icon role). Do not substitute a different control.
+    - CRITICAL — hub/list branching: on hub, menu, or settings-list screens, each row opens a
+      DIFFERENT destination. A tap hint must NOT claim control A opens screen B when the action
+      description says control A (e.g. "Your Addresses" must open the addresses screen, not
+      "Account settings"; "Account" opens account settings). Match control → destination precisely.
+    - After each tap hint, the screen reached must match the NEXT waypoint name (or the visible
+      title if it differs from tag). If the tapped row label differs from the waypoint tag,
+      prefer the waypoint name and the correct row for that waypoint — never cross-wire rows.
+    - For tap/click actions, convert descriptions into robust agent instructions with stable
+      regions (top-right menu, bottom tab, settings list, search field, modal, bottom sheet).
+    - If the path contains scroll/swipe then tap X, preserve the scroll/swipe step explicitly;
+      do NOT collapse it into only "tap X" when a scroll/swipe action exists between those screens.
+    - If some exploration paths required recovery before the shared route (incognito off, dismiss dialog,
+      switch tab, swipe filter strip), put those as OPTIONAL first hints prefixed with "If visible:" or
+      "Only if needed:" — do NOT make them waypoints and do NOT create a separate plan for them alone.
+    - Assume the agent already stands on the reset landing screen; the first hint should usually advance
+      toward the first waypoint, not re-describe being on home unless recovery is required.
     - Avoid exact coordinates, bounding boxes, fragile visual details, and overlay colors.
     - Never include "open the app" or "launch the app".
     - Do not include actions that happen after the final page/state is reached.
@@ -1918,7 +2049,7 @@ class VLM_Yibu:
     {
     "navigation_plans": [
         {
-        "root_id": "...",
+        "root_ids": ["..."],
         "ui_navigation_memory": {
             "relevant_waypoint_sequence": [
             "..."
@@ -1937,25 +2068,40 @@ class VLM_Yibu:
         else:
             path_items = [(str(i), path) for i, path in enumerate(paths)]
 
+        input_root_ids = [str(root_id) for root_id, _ in path_items]
         compact_paths = []
 
         for root_id, path in path_items:
             compact_paths.append({
                 "root_id": str(root_id),
-                "page_summaries": path.get("page_summaries", []),
+                "enhanced_page_summaries": (
+                    path.get("enhanced_page_summaries")
+                    or path.get("page_summaries", [])
+                ),
                 "actions": clean_actions(path.get("actions", [])),
             })
 
+        num_paths = len(compact_paths)
         user_prompt = f"""
-    You are given multiple in-app navigation paths to the same FINAL node/page/state.
+    You are given {num_paths} in-app navigation paths to the same FINAL node/page/state.
 
-    Each path may start from a different root or starting context.
+    Paths may start from different exploration roots, but at inference the agent begins on a reset
+    landing screen (shared home/main tab). Generate plans for that runtime: merge paths that only
+    differ in leading landing/recovery steps, and omit shared landing screens from waypoints.
 
-    Generate route memory for each path independently.
+    Each path includes ordered actions (type + description). Your transition_hints MUST include
+    every action in order — do not omit scroll/swipe steps or mislabel which control opens which screen.
+
+    Cluster semantically equivalent post-landing routes and return at most 3 navigation plans total.
+    Every input root_id must appear in exactly one root_ids list.
+    Do NOT emit one plan per root.
 
     Do NOT generate user_intents.
     Do NOT use screenshots.
     Do NOT include app launch or phone home screen steps.
+
+    Input root ids:
+    {json.dumps(input_root_ids, ensure_ascii=False)}
 
     Paths:
     {json.dumps(compact_paths, ensure_ascii=False, indent=2)}
@@ -1975,7 +2121,7 @@ class VLM_Yibu:
         ]
 
         response = self._multimodal_conversation_call(
-            model=self.configs.post_process.vlm_model_name,
+            model=self._post_process_model_for_node_navigation_plans(),
             messages=messages,
             response_format={"type": "json_object"},
             vl_high_resolution_images=True,

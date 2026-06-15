@@ -21,7 +21,8 @@ import traceback
 import dashscope
 import os
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 from tqdm import tqdm
 
 from networkx.readwrite import json_graph
@@ -133,7 +134,30 @@ def simplify_edge_actions(edge_data):
     return simplified
 
 
-def build_paths_for_node(nx_graph, node_id):
+def resolve_enhanced_page_summary(path_node_id, node_intents, nx_graph):
+    """Return enhanced_page_summary dict from node_intents, or a graph-metadata fallback."""
+    node_intents = node_intents or {}
+    enhanced = node_intents.get(path_node_id, {}).get("enhanced_page_summary")
+    if isinstance(enhanced, dict) and enhanced:
+        return enhanced
+
+    node_data = nx_graph.nodes[path_node_id]
+    compact = str(node_data.get("page_summary", "") or "").strip()
+    page_purpose = str(node_data.get("page_purpose", "") or "").strip() or compact
+    return {
+        "tag": compact[:80] if compact else path_node_id,
+        "active_tab": node_data.get("active_tab"),
+        "active_subtab": node_data.get("active_subtab"),
+        "page_purpose": page_purpose,
+        "screen_type": "",
+        "selected_navigation": "",
+        "visual_landmarks": [],
+        "regions": {"top_bar": "", "main_area": "", "bottom_nav": ""},
+        "salient_controls": [],
+    }
+
+
+def build_paths_for_node(nx_graph, node_id, node_intents, logs_root):
     root_node_ids = [node_id for node_id, node in nx_graph.nodes(data=True) if node.get("is_root", False)]
     paths = dict()
     for root_node_id in root_node_ids:
@@ -143,74 +167,232 @@ def build_paths_for_node(nx_graph, node_id):
             continue
 
         screenshots = []
-        page_summaries = []
+        enhanced_page_summaries = []
         actions = []
-        for i,node in enumerate(node_path):
-            screenshot = cv2.imread(os.path.join(configs.logs.root, "screenshots", node + ".jpg"))
+        for i, node in enumerate(node_path):
+            screenshot = cv2.imread(os.path.join(logs_root, "screenshots", node + ".jpg"))
             screenshots.append(screenshot)
-            page_summaries.append(nx_graph.nodes[node].get("page_summary", ""))
+            enhanced_page_summaries.append(
+                resolve_enhanced_page_summary(node, node_intents, nx_graph)
+            )
             if i < len(node_path) - 1:
-                screenshots[i] = visualize_edge_on_screenshot(screenshots[i], nx_graph.get_edge_data(node_path[i], node_path[i + 1]))
-                actions.append(simplify_edge_actions(nx_graph.get_edge_data(node_path[i], node_path[i + 1])))
+                screenshots[i] = visualize_edge_on_screenshot(
+                    screenshots[i],
+                    nx_graph.get_edge_data(node_path[i], node_path[i + 1]),
+                )
+                actions.append(
+                    simplify_edge_actions(
+                        nx_graph.get_edge_data(node_path[i], node_path[i + 1])
+                    )
+                )
 
         paths[root_node_id] = {
             "screenshots": screenshots,
-            "page_summaries": page_summaries,
-            "actions": actions
-
+            "enhanced_page_summaries": enhanced_page_summaries,
+            "actions": actions,
         }
 
     return paths
 
 
-def save_node_intents_and_navigation_plans(nx_graph, vlm_client, configs, dbg):
-    node_intents = dict()
+def normalize_clustered_navigation_plans(navigation_plans, input_root_ids=None, max_plans=3):
+    """Normalize clustered VLM navigation output into ui_navigation_memory entries."""
+    if not isinstance(navigation_plans, list):
+        return []
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        for node_id in tqdm(nx_graph.nodes(), total=len(nx_graph.nodes())):
-            node_intents[node_id] = {}
+    normalized = []
+    for item in navigation_plans:
+        if not isinstance(item, dict):
+            continue
 
-            paths = build_paths_for_node(nx_graph, node_id)
-            if not paths:
-                continue
+        root_ids = item.get("root_ids")
+        if not root_ids and item.get("root_id"):
+            root_ids = [item.get("root_id")]
 
-            out_edges_all = [
-                attrs["description"]
-                for _, _, attrs in nx_graph.out_edges(node_id, data=True)
-            ]
+        memory = item.get("ui_navigation_memory")
+        if not isinstance(memory, dict):
+            memory = item
 
-            out_edges = [
-                d for d in out_edges_all
-                if not (isinstance(d, str) and ("scroll" in d.lower() or "swipe" in d.lower()))
-            ] or out_edges_all
+        normalized.append(
+            {
+                "root_ids": [str(r) for r in (root_ids or []) if str(r).strip()],
+                "relevant_waypoint_sequence": memory.get("relevant_waypoint_sequence", []),
+                "transition_hints": memory.get("transition_hints", []),
+            }
+        )
 
-            primary_path = min(
-                paths.values(),
-                key=lambda v: len(v.get("actions", []))
+    if max_plans and len(normalized) > max_plans:
+        normalized = normalized[:max_plans]
+
+    if input_root_ids:
+        covered = {rid for plan in normalized for rid in plan.get("root_ids", [])}
+        missing = [str(rid) for rid in input_root_ids if str(rid) not in covered]
+        if missing and normalized:
+            normalized[-1]["root_ids"] = list(
+                dict.fromkeys(normalized[-1].get("root_ids", []) + missing)
             )
 
-            with dbg.time_block(f"VLM calls for node {node_id}"):
-                future_intents = executor.submit(
-                    vlm_client.get_node_user_intents, primary_path, out_edges
-                )
-                future_plans = executor.submit(
-                    vlm_client.get_node_navigation_plans, paths
-                )
-                intent_output = future_intents.result()
-                navigation_plans = future_plans.result()
+    return normalized
 
-            user_intents = list(dict.fromkeys(intent_output.get("user_intents", [])))
-            node_intents[node_id]["user_intents"] = user_intents
-            node_intents[node_id]["ui_navigation_memory"] = [
-                item["ui_navigation_memory"] for item in navigation_plans
-            ]
-   
 
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "w", encoding="utf-8") as f:
-        json.dump(node_intents, f, ensure_ascii=False, indent=4)
+def _process_node_intents(node_id, nx_graph, vlm_client, logs_root):
+    paths = build_paths_for_node(nx_graph, node_id, {}, logs_root)
+    if not paths:
+        return None
 
-    return 
+    out_edges_all = [
+        attrs["description"]
+        for _, _, attrs in nx_graph.out_edges(node_id, data=True)
+    ]
 
+    out_edges = [
+        d for d in out_edges_all
+        if not (isinstance(d, str) and ("scroll" in d.lower() or "swipe" in d.lower()))
+    ] or out_edges_all
+
+    primary_path = min(
+        paths.values(),
+        key=lambda v: len(v.get("actions", []))
+    )
+
+    intent_output = vlm_client.get_node_user_intents(primary_path, out_edges)
+
+    return node_id, {
+        "user_intents": list(dict.fromkeys(intent_output.get("user_intents", []))),
+        "enhanced_page_summary": intent_output.get("enhanced_page_summary", {}),
+    }
+
+
+def save_node_intents(nx_graph, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    node_intents_path = os.path.join(logs_root, "node_intents.json")
+
+    if os.path.exists(node_intents_path):
+        with open(node_intents_path, "r", encoding="utf-8") as f:
+            try:
+                node_intents = json.load(f)
+            except json.JSONDecodeError:
+                node_intents = {}
+    else:
+        node_intents = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
+    write_lock = threading.Lock()
+    node_ids = list(nx_graph.nodes())
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_node_intents,
+                node_id,
+                nx_graph,
+                vlm_client,
+                logs_root,
+            ): node_id
+            for node_id in node_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process nodes"):
+            node_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for node {node_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                node_intents[node_id] = entry
+                with open(node_intents_path, "w", encoding="utf-8") as f:
+                    json.dump(node_intents, f, ensure_ascii=False, indent=4)
+
+    return node_intents
+
+def _process_node_navigation_plans(node_id, node_intents, nx_graph, vlm_client, logs_root):
+
+    paths = build_paths_for_node(nx_graph, node_id, node_intents, logs_root)
+    if not paths:
+        return None
+
+    paths = {
+        root_id: bundle
+        for root_id, bundle in sorted(
+            paths.items(),
+            key=lambda item: len(item[1].get("actions") or []),
+        )[:3]
+    }
+
+    navigation_plans = []
+    for root_id, bundle in paths.items():
+        plans = vlm_client.get_node_navigation_plans({root_id: bundle})
+        navigation_plans.extend(plans)
+
+
+    ui_navigation_memory = normalize_clustered_navigation_plans(
+        navigation_plans,
+        input_root_ids=list(paths.keys()),
+        max_plans=3,
+    )
+
+    return node_id, {"ui_navigation_memory": ui_navigation_memory}
+
+
+
+
+
+def save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    node_navigation_plans_path = os.path.join(logs_root, "node_navigation_plans.json")
+
+    if os.path.exists(node_navigation_plans_path):
+        with open(node_navigation_plans_path, "r", encoding="utf-8") as f:
+            try:
+                node_navigation_plans = json.load(f)
+            except json.JSONDecodeError:
+                node_navigation_plans = {}
+    else:
+        node_navigation_plans = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
+    write_lock = threading.Lock()
+    node_ids = list(nx_graph.nodes())
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_node_navigation_plans,
+                node_id,
+                node_intents,
+                nx_graph,
+                vlm_client,
+                logs_root,
+            ): node_id
+            for node_id in node_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process nodes"):
+            node_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for node {node_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                node_navigation_plans[node_id] = entry
+                with open(node_navigation_plans_path, "w", encoding="utf-8") as f:
+                    json.dump(node_navigation_plans, f, ensure_ascii=False, indent=4)
+
+    return node_navigation_plans
 
 
 def add_node_embeddings_to_user_intents(
@@ -334,7 +516,13 @@ if __name__ == "__main__":
 
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
-    save_node_intents_and_navigation_plans(nx_graph, vlm_client, configs, dbg)
+    node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
+    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
+        node_intents = json.load(f)
+    node_navigation_plans = save_node_navigation_plans(
+        nx_graph, node_intents, vlm_client, configs, dbg
+    )
+
 
     dbg.log("Node intents and navigation plans saved successfully", color="green")
     dbg.log("Stage 2, save indices for Retrieval", color="green")
