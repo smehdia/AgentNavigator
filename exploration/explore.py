@@ -174,7 +174,7 @@ if __name__ == "__main__":
                 app_graph.export_nx_graph_json(os.path.join(configs.logs.root, "graph.json"))
 
             elif selected_mode == "random_walk":
-                walker.random_walk(max_num_actions=configs.graph.max_consecutive_exploration_actions_in_each_iteration)
+                walker.random_walk(max_num_actions=configs.graph.max_consecutive_exploration_actions_in_each_iteration, save_debug_path=True)
                 app_graph.logs_num_walks_nodes.append([int(app_graph.num_walks), len(app_graph.nodes), "random_walk"])
                 app_graph.export_app_graph_state(configs.logs.root)
                 app_graph.export_interactive_node_graph(os.path.join(configs.logs.root, "screenshots"), os.path.join(configs.logs.root, "interactive_node_graph.html"))
