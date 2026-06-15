@@ -258,6 +258,7 @@ Configs live in `inference/configs/`. Each file has a top-level `default:` block
 | Config | App | Platform |
 |--------|-----|----------|
 | `airbnb_android.yaml` | Airbnb | Android |
+| `alibaba_harmony.yaml` | Alibaba | HarmonyOS |
 | `amazon_android.yaml` | Amazon | Android |
 | `clock_android.yaml` | Clock | Android |
 | `ebay_android.yaml` | eBay | Android |
@@ -267,6 +268,7 @@ Configs live in `inference/configs/`. Each file has a top-level `default:` block
 | `target_android.yaml` | Target | Android |
 | `yelp_android.yaml` | Yelp | Android |
 | `youtube_android.yaml` | YouTube | Android |
+| `zhixing_train_harmony.yaml` | Zhixing Train Tickets | HarmonyOS |
 
 Copy an existing config and adjust `device_id`, API keys, `logs.root`, and paths for your setup.
 
