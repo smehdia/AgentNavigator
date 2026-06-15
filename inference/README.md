@@ -2,17 +2,141 @@
 
 Run a natural-language navigation goal on a **physical device** using an explored app graph. Inference retrieves the best target screen from exploration artifacts, optionally lets you confirm the pick in a Gradio UI, then drives the UI agent step-by-step until the goal is reached.
 
-**Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `node_intents.json`, and `screenshots/`.
+**Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `node_intents.json`, `node_navigation_plans.json`, and `screenshots/`.
 
 ---
 
-## Quick start
+## Inference GUI (demo wizard)
+
+A **React + FastAPI** web UI for live demos: configure the run, verify agent/device, preview the phone, then drive the full retrieval → selection → navigation loop from a single chat panel.
+
+All GUI code lives under [`gui_demo/`](gui_demo/):
+
+```text
+inference/
+├── run_gui.sh            # Convenience launcher
+└── gui_demo/
+    ├── inference_gui.py  # FastAPI backend (REST + WebSockets)
+    ├── pipeline.py       # Retrieval / navigation helpers used by the GUI
+    ├── requirements-gui.txt
+    └── web/              # React + Vite frontend
+        ├── src/
+        └── dist/         # Production build (served by FastAPI)
+```
+
+The CLI script [`inference.py`](inference.py) is unchanged and does not depend on `gui_demo/`.
+
+### Prerequisites
+
+Same as CLI inference, plus:
+
+- **Python env** — the conda/venv you use for `inference.py` (FlagEmbedding, dynaconf, dashscope, etc.)
+- **Node.js 18+** — to build the frontend (`npm`)
+- **Device** — Android emulator or physical device on ADB (`adb devices`)
+- **Agent server** — MAI-UI or UI-TARS at the URL in config
+- **Exploration artifacts** under `logs.root`: `graph.json`, `node_intents.json`, `node_navigation_plans.json`, `screenshots/`
+
+### One-time setup
+
+From the `inference/` directory, with your inference Python env active:
+
+```bash
+cd inference
+
+# Extra GUI Python packages
+pip install -r gui_demo/requirements-gui.txt
+
+# Frontend build (unset proxy if npm hangs)
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy
+cd gui_demo/web && npm install && npm run build
+```
+
+Re-run `npm run build` in `gui_demo/web/` after any frontend changes.
+
+### Run (recommended)
+
+```bash
+cd inference
+bash run_gui.sh
+```
+
+Open [http://localhost:8765](http://localhost:8765).
+
+`run_gui.sh` clears common proxy env vars and starts uvicorn from the correct directory.
+
+### Run (manual)
+
+**Demo / single port** (serves the built React app from `gui_demo/web/dist/`):
+
+```bash
+cd inference
+unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy   # optional
+uvicorn gui_demo.inference_gui:app --host 0.0.0.0 --port 8765
+```
+
+**Development** (hot-reload frontend, two terminals):
+
+```bash
+# Terminal 1 — API
+cd inference
+uvicorn gui_demo.inference_gui:app --reload --port 8765
+
+# Terminal 2 — Vite (proxies /api and /ws to :8765)
+cd inference/gui_demo/web
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173) for dev, or [http://localhost:8765](http://localhost:8765) for the production build.
+
+### Wizard (5 steps)
+
+| Step | What you do |
+|------|-------------|
+| **1. Configure** | Review/edit settings loaded from `configs/outlook_android.yaml` (device, agent URL, VLM keys, `logs.root`, retrieval toggles). Click **Apply Config**. |
+| **2. Checks** | **Run Checks** — verifies agent server (`/v1/models`) and device (ADB/HDC). Both must pass. |
+| **3. Device** | **Connect to Device** — launches the app and starts a live screenshot stream. |
+| **4. Load** | **Load Resources** — loads graph, node intents, BGE-M3, VLM client, and agent into memory (first BGE load can take ~30s). |
+| **5. Navigate** | Full inference flow in one chat panel (see below). |
+
+Later steps unlock only after the previous step succeeds.
+
+### Navigate step (chat flow)
+
+Everything after resource load happens in the **Navigate** chat:
+
+1. **Prompt** — type a goal (e.g. *Navigate to the Feedback to Microsoft page.*) and **Send**.
+2. **Candidates** — if `use_memory_for_navigation` is on, top retrieval hits appear as inline cards in the chat. Tap the best match.
+3. **Memory** — formatted navigation memory for the selected node appears as the next assistant message.
+4. **Execute** — click **Execute** in the chat footer to reset the device and run the agent loop.
+5. **Steps** — each action (thought + annotated screenshot) streams into the chat. Use **Stop Navigation** to halt after the current step.
+6. **Repeat** — when finished or stopped, send a new prompt to run again.
+
+If memory navigation is **off**, steps 2–3 are skipped and **Execute** is offered right after the prompt.
+
+On wide screens, a live device preview panel appears beside the chat during execution.
+
+### GUI troubleshooting
+
+| Issue | Fix |
+|-------|-----|
+| `ModuleNotFoundError: No module named 'gui_demo'` | Run uvicorn from `inference/`, not the repo root. Or use `bash run_gui.sh`. |
+| `npm install` hangs | Unset proxy env vars (see one-time setup) or run `npm install --proxy=null --https-proxy=null`. |
+| Blank page at `:8765` | Build the frontend: `cd gui_demo/web && npm run build`. |
+| Agent check fails | Confirm agent URL in config; test with `curl -sSf http://HOST:8089/v1/models`. |
+| Device check fails | Run `adb devices`; update `driver.device_id` in config. |
+| Load fails on graph/intents | Check `logs.root` path and that post-processing completed. |
+| No candidate cards | Set `use_memory_for_navigation: true` in config; ensure embeddings exist in `node_intents.json`. |
+| Stop does not interrupt instantly | Stop is cooperative — it finishes the current agent step, then halts. |
+
+---
+
+## Quick start (CLI)
 
 From the `inference/` directory:
 
 ```bash
 cd inference
-python inference.py --config configs/clock_harmony.yaml
+python inference.py --config configs/clock_android.yaml
 ```
 
 If `query` is empty in the config, the script prompts:
@@ -38,13 +162,18 @@ Configs live in `inference/configs/`. Each file has a top-level `default:` block
 
 | Config | App | Platform |
 |--------|-----|----------|
-| `clock_harmony.yaml` | Clock | HarmonyOS |
-| `clock_android.yaml` | Clock | Android |
+| `airbnb_android.yaml` | Airbnb | Android |
 | `amazon_android.yaml` | Amazon | Android |
-| `youtube_android.yaml` | YouTube | Android (template; align `logs.root` with your exploration output) |
+| `clock_android.yaml` | Clock | Android |
+| `ebay_android.yaml` | eBay | Android |
+| `google_maps_android.yaml` | Google Maps | Android |
+| `linkedin_android.yaml` | LinkedIn | Android |
 | `outlook_android.yaml` | Outlook | Android (includes batch-mode example) |
+| `target_android.yaml` | Target | Android |
+| `yelp_android.yaml` | Yelp | Android |
+| `youtube_android.yaml` | YouTube | Android |
 
-Copy an existing config and adjust device IDs, API keys, and paths for your setup.
+Copy an existing config and adjust `device_id`, API keys, `logs.root`, and paths for your setup.
 
 ### `app`
 
@@ -130,7 +259,7 @@ If coordinates look wrong (e.g. Y lands on a different row than the described el
 
 | Field | Description |
 |-------|-------------|
-| `root` | Path to exploration output (relative to `inference/` or absolute). Must contain `graph.json`, `node_intents.json`, and `screenshots/{node_id}.jpg`. |
+| `root` | Path to exploration output (relative to `inference/` or absolute). Must contain `graph.json`, `node_intents.json`, `node_navigation_plans.json`, and `screenshots/{node_id}.jpg`. |
 | `resume_from_checkpoint` | Used by exploration; ignored by inference |
 
 ### Inference-specific fields
@@ -378,8 +507,9 @@ The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends scr
 | File / folder | Source | Used for |
 |---------------|--------|----------|
 | `graph.json` | Exploration export | Node `page_purpose`, graph structure, depths |
-| `node_intents.json` | Post-process | Embeddings, `user_intents`, `ui_navigation_memory` |
-| `screenshots/{node_id}.jpg` | Exploration | Gradio gallery, debugging |
+| `node_intents.json` | Post-process Stage 1 + 3 | Embeddings, `user_intents`, `enhanced_page_summary` |
+| `node_navigation_plans.json` | Post-process Stage 2 | `ui_navigation_memory` per node |
+| `screenshots/{node_id}.jpg` | Exploration | Gradio / GUI candidate cards, debugging |
 
 If any of these are missing, retrieval or the picker may fail or show empty galleries.
 
@@ -396,6 +526,8 @@ Run from `inference/` with the same Python environment as exploration. Key packa
 - `dashscope` — VLM rerank (via `VLM.py`)
 
 Device control and agents are provided under `Driver/` and `Agents/` in this directory.
+
+**GUI (`gui_demo/`)** additionally requires packages in [`gui_demo/requirements-gui.txt`](gui_demo/requirements-gui.txt) (`fastapi`, `uvicorn`, `pyyaml`) and a Node.js build of `gui_demo/web/`. See [Inference GUI](#inference-gui-demo-wizard).
 
 ---
 
