@@ -318,6 +318,10 @@ def _process_node_navigation_plans(node_id, node_intents, nx_graph, vlm_client, 
     if not paths:
         return None
 
+    print(paths)
+
+    
+
     paths = {
         root_id: bundle
         for root_id, bundle in sorted(
@@ -360,6 +364,8 @@ def save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
     max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
     write_lock = threading.Lock()
     node_ids = list(nx_graph.nodes())
+
+    node_ids = list(filter(lambda x: '07d6' in x, node_ids))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -415,6 +421,16 @@ def add_node_embeddings_to_user_intents(
     Each node gets:
         - embedding_text
         - embedding
+
+    Embedding text uses:
+        - enhanced_page_summary.tag
+        - enhanced_page_summary.screen_type
+        - enhanced_page_summary.page_purpose
+        - enhanced_page_summary.selected_navigation
+        - enhanced_page_summary.active_tab / active_subtab
+        - enhanced_page_summary.salient_controls
+        - enhanced_page_summary.visual_landmarks
+        - user_intents
     """
 
     graph_path = os.path.join(root_path, graph_filename)
@@ -429,30 +445,40 @@ def add_node_embeddings_to_user_intents(
     with open(user_intents_path, "r", encoding="utf-8") as f:
         user_intents_data = json.load(f)
 
+    def build_node_embedding_text(node_data):
+        summary = node_data.get("enhanced_page_summary", {}) or {}
+
+        tag = summary.get("tag") or ""
+        screen_type = summary.get("screen_type") or ""
+
+        page_purpose = (
+            summary.get("page_purpose")
+            or node_data.get("page_purpose")
+            or ""
+        )
+        user_intents = intent_data.get("user_intents", []) or []
+
+        embedding_text = f"""
+        PAGE_TAG:
+        {tag}
+
+        PAGE_PURPOSE:
+        {page_purpose}
+
+        USER_INTENTS:
+        {json.dumps(user_intents, ensure_ascii=False)}
+        """.strip()
+
+
+        return embedding_text
+
     node_ids = []
     embedding_texts = []
 
     for node_id, intent_data in user_intents_data.items():
-        node_data = graph.nodes.get(node_id, {})
 
-        page_purpose = node_data.get("page_purpose", "")
-        active_tab = node_data.get("active_tab", "")
-        active_subtab = node_data.get("active_subtab", "")
-        user_intents = intent_data.get("user_intents", [])
-
-        embedding_text = f"""
-PAGE_PURPOSE:
-{page_purpose}
-
-ACTIVE_TAB:
-{active_tab}
-
-ACTIVE_SUBTAB:
-{active_subtab}
-
-USER_INTENTS:
-{json.dumps(user_intents, ensure_ascii=False)}
-""".strip()
+        node_data = user_intents_data[node_id]
+        embedding_text = build_node_embedding_text(node_data=node_data)
 
         node_ids.append(node_id)
         embedding_texts.append(embedding_text)
@@ -492,7 +518,6 @@ USER_INTENTS:
         "embedding_dim": int(embeddings.shape[1]),
     }
 
-
 if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
 
@@ -517,6 +542,8 @@ if __name__ == "__main__":
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
     node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
+    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
+        node_intents = json.load(f)
     dbg.log("Stage 1 complete: node_intents.json", color="green")
 
     save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
