@@ -1784,9 +1784,6 @@ class VLM:
     landing screen (shared home/main tab). Generate plans for that runtime: merge paths that only
     differ in leading landing/recovery steps, and omit shared landing screens from waypoints.
 
-    Each path includes ordered actions (type + description). Your transition_hints MUST include
-    every action in order — do not omit scroll/swipe steps or mislabel which control opens which screen.
-
     Cluster semantically equivalent post-landing routes and return at most 3 navigation plans total.
     Every input root_id must appear in exactly one root_ids list.
     Do NOT emit one plan per root.
