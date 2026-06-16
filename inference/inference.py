@@ -89,9 +89,14 @@ def get_ui_navigation_memory_for_node(node_navigation_plans: dict, node_id: str)
 
 
 def build_retrieval_query(user_goal: str) -> str:
+    user_goal = user_goal.strip()
+
     return f"""
+PAGE_TAG:
+{user_goal}
+
 PAGE_PURPOSE:
-A UI page or screen for this goal: {user_goal}
+{user_goal}
 
 USER_INTENTS:
 {user_goal}
@@ -297,18 +302,32 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
             query=build_retrieval_query(task_prompt),
             top_k=configs.top_k_in_first_stage_retrieval,
         )
+
+        for result in results:
+            node_id = result["node_id"]
+            img = cv2.imread(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg"))
+            cv2.imshow('out', cv2.resize(img, None, fx=0.5, fy=0.5))
+            cv2.waitKey(0)
+            print(result)
+        
         candidates = []
         for result in results:
             node_id = result["node_id"]
             node_entry = node_intents.get(node_id, {})
-            candidates.append({
-                "node_id": result["node_id"],
-                "page_purpose": graph.nodes[node_id]["page_purpose"],
-                "depth": depths[node_id],
-                "score": result["score"],
-                "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
-                "ui_navigation_memory": get_ui_navigation_memory_for_node(node_navigation_plans, node_id),
-            })
+            summary = node_entry.get("enhanced_page_summary", {}) or {}
+
+            candidates.append(
+                {
+                    "node_id": node_id,
+                    "page_tag": summary.get("tag", ""),
+                    "page_purpose": summary.get("page_purpose", ""),
+                    "screen_type": summary.get("screen_type", ""),
+                    "selected_navigation": summary.get("selected_navigation", ""),
+                    "depth": depths.get(node_id),
+                    "score": result.get("score"),
+                    "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
+                }
+            )
 
         top_k_node_ids, result = vlm_client.rerank_candidates(task_prompt, candidates, top_k=configs.top_k_retrieval_in_stage_2)
         candidates = [c for c in candidates if c["node_id"] in top_k_node_ids]

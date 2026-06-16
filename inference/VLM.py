@@ -97,30 +97,31 @@ class VLM:
                 {
                     "text": (
                         "You are a strict reranking module for Android UI navigation.\n"
-                        "Your task is to select the best target nodes for a user's navigation query.\n\n"
+                        "Your task is to select the best TARGET PAGE nodes for a user's navigation query.\n\n"
                         "Each candidate may contain:\n"
                         "- node_id: unique node identifier\n"
-                        "- page_purpose: what the page/screen is mainly for\n"
+                        "- page_tag: short page/screen label\n"
+                        "- page_purpose: what the page/screen itself is mainly for\n"
+                        "- screen_type: page type such as settings_list, list_page, modal_menu, dialog, overlay, detail_page\n"
+                        "- selected_navigation: current selected section if available\n"
                         "- depth: navigation depth from root; lower means easier to reach\n"
                         "- score: embedding similarity score between the query and the node\n"
-                        "- user_intents: possible user goals supported by this node\n"
-                        "- ui_navigation_memory: waypoint and transition hints\n\n"
+                        "- user_intents: possible user goals directly supported by this node\n\n"
                         "Ranking rules:\n"
-                        "1. Prefer candidates whose page_purpose directly satisfies the user query.\n"
-                        "2. Match the specificity of the user query:\n"
-                        "   - If the query is broad or generic, prefer the broad parent page.\n"
-                        "   - If the query is specific, prefer the most specific page that directly satisfies it.\n"
-                        "3. Do not select a more specific sub-setting page unless the query explicitly mentions that specific setting.\n"
-                        "4. Then prefer candidates whose user_intents directly match the query.\n"
-                        "5. Relevance and specificity are more important than depth or embedding score.\n"
-                        "6. Use depth only as a tie-breaker when relevance and specificity are similar.\n"
-                        "7. Penalize menus, dialogs, popups, temporary overlays, and intermediate screens unless the query explicitly asks for them.\n"
-                        "8. Penalize candidates that are only indirectly related, even if their embedding score is high.\n"
+                        "1. Select the node whose page itself directly satisfies the user query.\n"
+                        "2. Prefer page_tag and page_purpose matches over path/menu/waypoint matches.\n"
+                        "3. If the query asks for a settings page, prefer candidates with screen_type='settings_list' or page_tag/page_purpose containing that settings destination.\n"
+                        "4. Penalize modal_menu, dialog, popup, overlay, and temporary menu screens unless the query explicitly asks to open a menu, dialog, popup, or overflow options.\n"
+                        "5. Do not select a menu merely because it contains a menu item that can lead to the desired page. Select the destination page if it is available.\n"
+                        "6. Match the specificity of the query: broad query -> broad parent page; specific query -> specific target page.\n"
+                        "7. Relevance and target-page correctness are more important than depth or embedding score.\n"
+                        "8. Use depth only as a tie-breaker when relevance is similar.\n"
                         "9. Only select node_ids from the provided candidates.\n\n"
                         "Examples:\n"
-                        "- For 'go to settings', prefer the main Settings page over Alarm settings, Timer settings, World clock style, or Date/time settings.\n"
-                        "- For 'change world clock style', prefer the specific World clock style/settings page over the generic Settings page.\n"
-                        "- For 'open alarm settings', prefer Alarm settings over the generic Settings page.\n\n"
+                        "- For 'navigate to notifications settings page', prefer 'Notifications Settings' with screen_type='settings_list' over 'Notifications Menu' with screen_type='modal_menu'.\n"
+                        "- For 'open notifications overflow menu', prefer 'Notifications Menu'.\n"
+                        "- For 'go to settings', prefer the main Settings page over specific sub-settings.\n"
+                        "- For 'change caption style', prefer the Caption preference/settings page over generic Settings.\n\n"
                         "You must output valid JSON only."
                     )
                 }
@@ -128,24 +129,27 @@ class VLM:
         }
 
         compact_candidates = []
+
         for c in candidates:
             compact_candidates.append(
                 {
                     "node_id": c.get("node_id"),
+                    "page_tag": c.get("page_tag", ""),
                     "page_purpose": c.get("page_purpose", ""),
+                    "screen_type": c.get("screen_type", ""),
+                    "selected_navigation": c.get("selected_navigation", ""),
                     "depth": c.get("depth"),
                     "score": c.get("score"),
                     "user_intents": c.get("user_intents", []),
-                    "ui_navigation_memory": c.get("ui_navigation_memory", []),
                 }
             )
-
         prompt = (
             "User query:\n"
             f"{user_query}\n\n"
-            "Specificity guidance:\n"
-            "- Broad query means the user asks for a general destination, such as settings, alarms, timer, stopwatch, profile, or help.\n"
-            "- Specific query means the user asks for a particular option, preference, subpage, configuration, or action.\n"
+            "Target-page guidance:\n"
+            "- Select the page that directly satisfies the user goal.\n"
+            "- Do not select an intermediate menu, overflow menu, dialog, or overlay if the actual destination page is available.\n"
+            "- For a query asking for a settings page, prefer an actual settings page/list over a menu containing a Settings item.\n"
             "- For a broad query, select the broadest directly matching page.\n"
             "- For a specific query, select the most specific page that directly satisfies the requested goal.\n\n"
             f"Select exactly {top_k} best candidate nodes.\n\n"

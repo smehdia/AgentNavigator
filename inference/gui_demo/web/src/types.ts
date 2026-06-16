@@ -46,7 +46,9 @@ export interface Candidate {
   node_id: string;
   score: number;
   depth: number;
+  page_tag?: string;
   page_purpose: string;
+  page_label?: string;
   user_intents: string[];
   vlm_reasoning: string;
   screenshot_url: string;

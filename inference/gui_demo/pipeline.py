@@ -14,10 +14,36 @@ import numpy as np
 from networkx.readwrite import json_graph
 
 
+def format_candidate_label(candidate: dict) -> str:
+    """Render page_tag + page_purpose for UI labels."""
+    tag = str(candidate.get("page_tag") or "").strip()
+    purpose = str(candidate.get("page_purpose") or "").strip()
+    if tag and purpose and tag != purpose:
+        return f"{tag}: {purpose}"
+    return tag or purpose
+
+
+def format_page_purpose_display(page_purpose) -> str:
+    """Render enhanced_page_summary (or legacy string) for UI labels."""
+    if isinstance(page_purpose, dict):
+        return format_candidate_label(
+            {
+                "page_tag": page_purpose.get("tag"),
+                "page_purpose": page_purpose.get("page_purpose"),
+            }
+        )
+    return str(page_purpose or "").strip()
+
+
 def build_retrieval_query(user_goal: str) -> str:
+    user_goal = user_goal.strip()
+
     return f"""
+PAGE_TAG:
+{user_goal}
+
 PAGE_PURPOSE:
-A UI page or screen for this goal: {user_goal}
+{user_goal}
 
 USER_INTENTS:
 {user_goal}
@@ -310,26 +336,35 @@ def run_retrieval(
     for result in results:
         node_id = result["node_id"]
         node_entry = ctx.node_intents.get(node_id, {})
+        summary = node_entry.get("enhanced_page_summary", {}) or {}
+
         candidates.append(
             {
                 "node_id": node_id,
-                "page_purpose": ctx.graph.nodes[node_id]["page_purpose"],
-                "depth": ctx.depths[node_id],
-                "score": result["score"],
+                "page_tag": summary.get("tag", ""),
+                "page_purpose": summary.get("page_purpose", ""),
+                "screen_type": summary.get("screen_type", ""),
+                "selected_navigation": summary.get("selected_navigation", ""),
+                "depth": ctx.depths.get(node_id),
+                "score": result.get("score"),
                 "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
-                "ui_navigation_memory": get_ui_navigation_memory_for_node(ctx, node_id),
             }
         )
 
     top_k_node_ids, vlm_reasoning = vlm_client.rerank_candidates(
         query, candidates, top_k=configs.top_k_retrieval_in_stage_2
     )
+    reasoning_map = (
+        vlm_reasoning.get("reasoning", {})
+        if isinstance(vlm_reasoning, dict)
+        else {}
+    )
     ordered = {nid: i for i, nid in enumerate(top_k_node_ids)}
     candidates = sorted(
         [c for c in candidates if c["node_id"] in top_k_node_ids],
         key=lambda c: ordered[c["node_id"]],
     )
-    return candidates, vlm_reasoning
+    return candidates, reasoning_map
 
 
 def get_navigation_memory_for_node(ctx: RetrievalContext, node_id: str, query: str) -> str:

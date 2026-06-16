@@ -52,7 +52,9 @@ function CandidateCards({
               </div>
             </div>
             <div className="p-2">
-              <p className="text-xs font-medium line-clamp-2 text-slate-800">{c.page_purpose}</p>
+              <p className="text-xs font-medium line-clamp-2 text-slate-800">
+                {c.page_label || c.page_purpose}
+              </p>
               {c.vlm_reasoning && (
                 <p className="text-[10px] text-slate-500 mt-1 line-clamp-2 italic">{c.vlm_reasoning}</p>
               )}

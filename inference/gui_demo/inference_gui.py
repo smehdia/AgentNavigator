@@ -42,6 +42,7 @@ from VLM import VLM
 
 from .pipeline import (
     encode_image_jpeg_b64,
+    format_candidate_label,
     get_navigation_memory_for_node,
     load_artifacts,
     run_navigation_loop,
@@ -589,7 +590,9 @@ async def retrieve(body: RetrieveRequest) -> dict:
                 "node_id": c["node_id"],
                 "score": c["score"],
                 "depth": c["depth"],
+                "page_tag": c.get("page_tag", ""),
                 "page_purpose": c.get("page_purpose", ""),
+                "page_label": format_candidate_label(c),
                 "user_intents": c.get("user_intents", []),
                 "vlm_reasoning": vlm_reasoning.get(c["node_id"], ""),
                 "screenshot_url": f"/api/screenshots/{c['node_id']}",
