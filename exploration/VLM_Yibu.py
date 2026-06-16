@@ -250,6 +250,56 @@ class VLM_Yibu:
             )
         return str(model).strip()
 
+    def _post_process_model_for_node_level_information(self) -> str:
+        post_process = self.configs.post_process
+        model = (
+            getattr(post_process, "vlm_model_name_for_node_level_information", None)
+            or getattr(post_process, "vlm_model_name_for_node_intents", None)
+            or getattr(post_process, "vlm_model_name", None)
+        )
+        if not model:
+            raise ValueError(
+                "post_process.vlm_model_name_for_node_level_information, "
+                "post_process.vlm_model_name_for_node_intents, or post_process.vlm_model_name must be set"
+            )
+        return str(model).strip()
+
+    def _post_process_model_for_edge_level_information(self) -> str:
+        post_process = self.configs.post_process
+        model = (
+            getattr(post_process, "vlm_model_name_for_edge_level_information", None)
+            or getattr(post_process, "vlm_model_name_for_transition_info", None)
+            or getattr(post_process, "vlm_model_name_for_node_level_information", None)
+            or getattr(post_process, "vlm_model_name_for_node_intents", None)
+            or getattr(post_process, "vlm_model_name", None)
+        )
+        if not model:
+            raise ValueError(
+                "post_process.vlm_model_name_for_edge_level_information, "
+                "post_process.vlm_model_name_for_transition_info, "
+                "post_process.vlm_model_name_for_node_level_information, "
+                "post_process.vlm_model_name_for_node_intents, or post_process.vlm_model_name must be set"
+            )
+        return str(model).strip()
+
+    def _post_process_model_for_transition_info(self) -> str:
+        post_process = self.configs.post_process
+        model = (
+            getattr(post_process, "vlm_model_name_for_transition_info", None)
+            or getattr(post_process, "vlm_model_name_for_edge_level_information", None)
+            or getattr(post_process, "vlm_model_name_for_node_level_information", None)
+            or getattr(post_process, "vlm_model_name_for_node_intents", None)
+            or getattr(post_process, "vlm_model_name", None)
+        )
+        if not model:
+            raise ValueError(
+                "post_process.vlm_model_name_for_transition_info, "
+                "post_process.vlm_model_name_for_edge_level_information, "
+                "post_process.vlm_model_name_for_node_level_information, "
+                "post_process.vlm_model_name_for_node_intents, or post_process.vlm_model_name must be set"
+            )
+        return str(model).strip()
+
     @staticmethod
     def _dashscope_messages_to_openai(messages: list) -> list:
         openai_messages = []
@@ -1673,6 +1723,299 @@ class VLM_Yibu:
 
         return result
 
+    def get_node_level_information(self, screenshot, page_summary, out_edges):
+        """
+        Generate node-level observation information for one UI graph node.
+
+        This is Pass 1 only:
+        - describes the current node's topmost active UI surface
+        - produces a local enhanced summary
+        - lists visible content, layout regions, salient controls
+        - maps outgoing action descriptions to outgoing affordances
+
+        It does NOT generate final user intents.
+        It does NOT generate navigation plans.
+        It does NOT decide whether the node is globally stable/noisy/transient.
+
+        Args:
+            screenshot:
+                Screenshot image/path/object accepted by resize_and_encode_to_base64.
+            page_summary:
+                Weak page summary from the weak VLM or earlier pipeline.
+            out_edges:
+                List of outgoing action descriptions for this node.
+                Can be strings, dicts with "description", or graph edge tuples.
+
+        Returns:
+            {
+                "node_observation": {
+                    ...
+                }
+            }
+        """
+
+        def clean_outgoing_actions(out_edges):
+            descriptions = []
+
+            if not out_edges:
+                return descriptions
+
+            for edge in out_edges:
+                desc = ""
+
+                if isinstance(edge, str):
+                    desc = edge.strip()
+
+                elif isinstance(edge, dict):
+                    desc = (
+                        edge.get("description")
+                        or edge.get("action_description")
+                        or edge.get("label")
+                        or ""
+                    ).strip()
+
+                    action_type = edge.get("type", "")
+                    if action_type and desc:
+                        desc = f"{action_type}: {desc}"
+
+                elif isinstance(edge, (tuple, list)):
+                    attrs = None
+
+                    if len(edge) == 3:
+                        attrs = edge[2]
+                    elif len(edge) == 4:
+                        attrs = edge[3]
+
+                    if isinstance(attrs, dict):
+                        desc = (
+                            attrs.get("description")
+                            or attrs.get("action_description")
+                            or attrs.get("label")
+                            or ""
+                        ).strip()
+
+                        action_type = attrs.get("type", "")
+                        if action_type and desc:
+                            desc = f"{action_type}: {desc}"
+
+                if desc:
+                    descriptions.append(desc)
+
+            return list(dict.fromkeys(descriptions))
+
+        def normalize_page_summary(page_summary):
+            if page_summary is None:
+                return ""
+
+            if isinstance(page_summary, str):
+                return page_summary.strip()
+
+            try:
+                return json.dumps(page_summary, ensure_ascii=False, indent=2)
+            except Exception:
+                return str(page_summary)
+
+        def ensure_schema(output):
+            if not isinstance(output, dict):
+                output = {}
+
+            node_observation = output.setdefault("node_observation", {})
+
+            node_observation.setdefault("active_surface", {})
+            node_observation["active_surface"].setdefault("surface_kind", "unknown")
+            node_observation["active_surface"].setdefault("is_overlay_active", False)
+            node_observation["active_surface"].setdefault("underlying_page_role", "unclear")
+            node_observation["active_surface"].setdefault("active_surface_evidence", [])
+
+            node_observation.setdefault("local_enhanced_summary", {})
+            node_observation["local_enhanced_summary"].setdefault("tag", "unknown")
+            node_observation["local_enhanced_summary"].setdefault("visible_surface_summary", "")
+            node_observation["local_enhanced_summary"].setdefault("local_page_purpose", "")
+            node_observation["local_enhanced_summary"].setdefault("screen_type", "unknown")
+            node_observation["local_enhanced_summary"].setdefault("active_tab", None)
+            node_observation["local_enhanced_summary"].setdefault("active_subtab", None)
+            node_observation["local_enhanced_summary"].setdefault("selected_navigation", None)
+
+            node_observation.setdefault("visible_content", [])
+
+            node_observation.setdefault("layout_regions", {})
+            node_observation["layout_regions"].setdefault("top_bar", "")
+            node_observation["layout_regions"].setdefault("main_area", "")
+            node_observation["layout_regions"].setdefault("bottom_nav", "")
+            node_observation["layout_regions"].setdefault("overlay", "")
+
+            node_observation.setdefault("local_ambiguity", [])
+            node_observation.setdefault("observation_confidence", 0.0)
+
+            return output
+
+        cleaned_out_edges = clean_outgoing_actions(out_edges)
+        weak_summary_text = normalize_page_summary(page_summary)
+        system_prompt = """
+        You are a mobile UI node-observation module.
+
+        You are given one screenshot of a mobile app node, a weak page summary, and outgoing action descriptions collected during exploration.
+
+        Your task is to describe the CURRENT NODE's topmost active UI surface using local visual evidence from this node.
+
+        If a modal, dialog, bottom sheet, popup menu, dropdown, picker, drawer, permission prompt, search overlay, or focused panel is open, describe that active surface. Treat the underlying page as background only.
+
+        Outgoing actions are graph evidence from exploration. Use them only to help associate visible controls with known actions from this node. Do not infer the destination page's purpose as the current node's purpose.
+
+        For visible content and controls, assign only a neutral visual_container describing where the element appears visually. Do not decide whether an element is useful, stable, noisy, task-relevant, or should be avoided. Those judgments require trajectory and user-goal context and will be made later.
+
+        For list-like pages, settings pages, menus, forms, and tab pages:
+        - Preserve every visible interactive row, button, tab, switch, checkbox, radio option, field, menu item, or settings item that appears on the active surface.
+        - Do not merge distinct visible interactive rows into one summary.
+        - Keep their visible order from top to bottom when possible.
+
+        For content-heavy feed/card pages:
+        - Preserve visible interactive controls and major visible content cards.
+        - Do not extract every tiny word inside large images or long content blocks unless it is prominent or needed to describe the visible surface.
+
+        Return JSON only using the requested schema. Do not add extra fields.
+        """.strip()
+        user_prompt = f"""
+        Weak page summary:
+        {weak_summary_text}
+
+        Outgoing actions from this node, provided as graph evidence:
+        {json.dumps(cleaned_out_edges, ensure_ascii=False, indent=2)}
+
+        Analyze the screenshot and return JSON with exactly this schema:
+
+        {{
+        "node_observation": {{
+            "active_surface": {{
+            "surface_kind": "main_page | tab | list | settings_list | menu | form | detail_page | dialog | modal | bottom_sheet | popup_menu | dropdown | picker | search_overlay | permission_prompt | focused_panel | unknown",
+            "is_overlay_active": true,
+            "underlying_page_role": "background_only | not_applicable | unclear",
+            "active_surface_evidence": [
+                "short visual evidence for why this is the active surface"
+            ]
+            }},
+            "local_enhanced_summary": {{
+            "tag": "short noun phrase, max 5 words",
+            "visible_surface_summary": "what is visibly present on the active surface",
+            "local_page_purpose": "what this surface locally appears to support, without route context",
+            "screen_type": "short label",
+            "active_tab": "string or null",
+            "active_subtab": "string or null",
+            "selected_navigation": "string or null"
+            }},
+            "visible_content": [
+            {{
+                "text_or_description": "important visible non-interactive text, object, section, card, or content group",
+                "region": "top_bar | main_area | bottom_nav | overlay | unknown",
+                "visual_container": "toolbar | tab_bar | page_header | section_header | list_content | content_card | feed_post_content | banner_or_prompt | form_content | modal_content | background_page | unknown"
+            }}
+            ],
+            "visible_interactive_elements": [
+            {{
+                "label": "visible label or inferred icon/control role",
+                "element_type": "button | tab | list_row | settings_row | switch | checkbox | radio_option | text_field | search_field | icon_button | menu_item | card | link | unknown",
+                "region": "top_bar | main_area | bottom_nav | overlay | unknown",
+                "visual_container": "toolbar | tab_bar | page_header | section_header | list_row | settings_row | content_card | feed_post_content | banner_or_prompt | form_field | modal_content | background_page | unknown",
+                "local_role": "what this element appears to do from the current active surface",
+                "visible_state": "selected | unselected | enabled | disabled | checked | unchecked | expanded | collapsed | unclear | not_applicable",
+                "order_index": 0,
+            }}
+            ],
+            "layout_regions": {{
+            "top_bar": "description or empty string",
+            "main_area": "description or empty string",
+            "bottom_nav": "description or empty string",
+            "overlay": "description or empty string"
+            }},
+            ],
+            "local_ambiguity": [
+            "what cannot be known from this node alone"
+            ],
+            "observation_confidence": 0.0
+        }}
+        }}
+
+        Guidelines:
+        - Focus on the topmost active UI surface.
+        - If an overlay is active, describe the overlay as the active surface and the underlying page only as background.
+        - Keep visual_container neutral. It describes where the element appears, not whether it is good or bad for navigation.
+        - Do not infer task relevance from visual_container.
+        - Preserve all visible interactive rows/controls on settings pages, menus, forms, tabs, and lists.
+        - Do not merge distinct settings rows, menu rows, tabs, form fields, or selectable list rows.
+        - Outgoing actions are known graph edges. Use them only to fill matched_outgoing_actions or unmatched_outgoing_actions.
+        - Do not describe outgoing destinations as the current node's purpose.
+        - Return valid JSON only.
+        """.strip()
+
+        is_final = True
+
+        max_side = (
+            self.configs.post_process.vlm_processing_img_size_for_last_screenshot
+            if is_final
+            else self.configs.post_process.vlm_processing_img_size_for_other_screenshots
+        )
+
+        quality = (
+            self.configs.post_process.vlm_processing_img_quality_for_last_screenshot
+            if is_final
+            else self.configs.post_process.vlm_processing_img_quality_for_other_screenshots
+        )
+
+        _, _, data_uri = resize_and_encode_to_base64(
+            screenshot,
+            target_size=max_side,
+            jpeg_quality=quality,
+        )
+
+        messages = [
+            {
+                "role": "system",
+                "content": [{"text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"text": user_prompt},
+                    {
+                        "text": (
+                            "Screenshot of the CURRENT NODE. "
+                            "Analyze the topmost active UI surface only."
+                        )
+                    },
+                    {"image": data_uri},
+                ],
+            },
+        ]
+
+        if hasattr(self, "_post_process_model_for_node_level_information"):
+            model_name = self._post_process_model_for_node_level_information()
+        else:
+            model_name = self._post_process_model_for_node_intents()
+
+        response = self._multimodal_conversation_call(
+            model=model_name,
+            messages=messages,
+            response_format={"type": "json_object"},
+            vl_high_resolution_images=True,
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        raw = response.output.choices[0].message.content
+        raw_text = (
+            "".join(
+                item.get("text", "")
+                for item in raw
+                if isinstance(item, dict)
+            ).strip()
+            if isinstance(raw, list)
+            else str(raw or "").strip()
+        )
+
+        output = parse_json_from_model_response(raw_text)
+        return ensure_schema(output)
+
     def get_node_user_intents(self, path, out_edges):
         """
         Generate user_intents for the final active surface of one visual path.
@@ -2260,3 +2603,572 @@ class VLM_Yibu:
         output = parse_json_from_model_response(raw_text)
 
         return output.get("navigation_plans", [])
+
+    def get_transition_info(
+        self,
+        action_crops,
+        edge_data,
+        source_node_level_information,
+        target_node_level_information,
+    ):
+        """
+        Pass 2: Transition-group interpretation.
+
+        Unit:
+            source node -> target node, with one or more parallel action variants.
+
+        Inputs:
+            action_crops:
+                Optional visual evidence for actions.
+                Supported forms:
+                - dict: {edge_id: crop_or_annotated_image}
+                - dict: {edge_id: {"image": crop_or_annotated_image, ...}}
+                - list: [crop1, crop2, ...] matched to edge_data order if possible
+
+            edge_data:
+                Parallel edges/actions from the same source node to the same target node.
+                Supported forms:
+                - {edge_id: {"type": "...", "description": "...", "boundingBox": [...]}}
+                - [{"edge_id": "...", "type": "...", "description": "..."}]
+                - networkx-like edge attrs list/dict
+
+            source_node_level_information:
+                Output from get_node_level_information() for source node.
+
+            target_node_level_information:
+                Output from get_node_level_information() for target node.
+
+        Output:
+            {
+                "transition_group_observation": {
+                    ...
+                }
+            }
+
+        This pass:
+        - preserves every action variant
+        - summarizes the shared source->target transition once
+        - extracts executable action signatures for final route planning
+
+        This pass does NOT:
+        - generate user intents
+        - generate final navigation plans
+        - decide whether the transition is canonical/noisy/useful globally
+        """
+        import json
+
+        def normalize_json_like(obj):
+            if obj is None:
+                return ""
+
+            if isinstance(obj, str):
+                return obj.strip()
+
+            try:
+                return json.dumps(obj, ensure_ascii=False, indent=2)
+            except Exception:
+                return str(obj)
+
+        def unwrap_node_observation(node_info):
+            """
+            Accept either:
+            {"node_observation": {...}}
+            or direct node_observation dict.
+            """
+            if not isinstance(node_info, dict):
+                return node_info
+
+            if "node_observation" in node_info:
+                return node_info["node_observation"]
+
+            return node_info
+
+        def normalize_edge_data(edge_data):
+            """
+            Convert edge_data into a list of action variants:
+            [
+                {
+                    "edge_id": "0",
+                    "action_type": "tap/nav/scroll/...",
+                    "action_description": "...",
+                    "bounding_box": [...]
+                }
+            ]
+            """
+            variants = []
+
+            if edge_data is None:
+                return variants
+
+            if isinstance(edge_data, dict):
+                items = list(edge_data.items())
+
+                for edge_id, attrs in items:
+                    if isinstance(attrs, str):
+                        variants.append({
+                            "edge_id": str(edge_id),
+                            "action_type": "",
+                            "action_description": attrs.strip(),
+                            "bounding_box": None,
+                        })
+                        continue
+
+                    if not isinstance(attrs, dict):
+                        variants.append({
+                            "edge_id": str(edge_id),
+                            "action_type": "",
+                            "action_description": str(attrs),
+                            "bounding_box": None,
+                        })
+                        continue
+
+                    desc = (
+                        attrs.get("description")
+                        or attrs.get("action_description")
+                        or attrs.get("label")
+                        or ""
+                    )
+
+                    variants.append({
+                        "edge_id": str(edge_id),
+                        "action_type": attrs.get("type", ""),
+                        "action_description": desc,
+                        "bounding_box": (
+                            attrs.get("boundingBox")
+                            or attrs.get("bounding_box")
+                            or attrs.get("bbox")
+                        ),
+                    })
+
+            elif isinstance(edge_data, list):
+                for i, item in enumerate(edge_data):
+                    if isinstance(item, str):
+                        variants.append({
+                            "edge_id": str(i),
+                            "action_type": "",
+                            "action_description": item.strip(),
+                            "bounding_box": None,
+                        })
+                        continue
+
+                    if not isinstance(item, dict):
+                        variants.append({
+                            "edge_id": str(i),
+                            "action_type": "",
+                            "action_description": str(item),
+                            "bounding_box": None,
+                        })
+                        continue
+
+                    edge_id = (
+                        item.get("edge_id")
+                        or item.get("id")
+                        or item.get("key")
+                        or str(i)
+                    )
+
+                    desc = (
+                        item.get("description")
+                        or item.get("action_description")
+                        or item.get("label")
+                        or ""
+                    )
+
+                    variants.append({
+                        "edge_id": str(edge_id),
+                        "action_type": item.get("type", ""),
+                        "action_description": desc,
+                        "bounding_box": (
+                            item.get("boundingBox")
+                            or item.get("bounding_box")
+                            or item.get("bbox")
+                        ),
+                    })
+
+            else:
+                variants.append({
+                    "edge_id": "0",
+                    "action_type": "",
+                    "action_description": str(edge_data),
+                    "bounding_box": None,
+                })
+
+            # Preserve order, remove exact duplicate edge_id + description pairs.
+            seen = set()
+            deduped = []
+
+            for variant in variants:
+                key = (
+                    variant.get("edge_id", ""),
+                    variant.get("action_type", ""),
+                    variant.get("action_description", ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(variant)
+
+            return deduped
+
+        def normalize_action_crops(action_crops, action_variants):
+            """
+            Returns list:
+            [
+                {
+                    "edge_id": "...",
+                    "image": image_obj_or_path,
+                    "note": "..."
+                }
+            ]
+            """
+            if not action_crops:
+                return []
+
+            normalized = []
+
+            if isinstance(action_crops, dict):
+                for edge_id, value in action_crops.items():
+                    if value is None:
+                        continue
+
+                    if isinstance(value, dict):
+                        image = (
+                            value.get("image")
+                            or value.get("crop")
+                            or value.get("screenshot")
+                            or value.get("visualized_action")
+                        )
+                        note = value.get("note", "")
+                    else:
+                        image = value
+                        note = ""
+
+                    if image is not None:
+                        normalized.append({
+                            "edge_id": str(edge_id),
+                            "image": image,
+                            "note": note,
+                        })
+
+            elif isinstance(action_crops, list):
+                for i, value in enumerate(action_crops):
+                    if value is None:
+                        continue
+
+                    if i < len(action_variants):
+                        edge_id = action_variants[i]["edge_id"]
+                    else:
+                        edge_id = str(i)
+
+                    if isinstance(value, dict):
+                        image = (
+                            value.get("image")
+                            or value.get("crop")
+                            or value.get("screenshot")
+                            or value.get("visualized_action")
+                        )
+                        note = value.get("note", "")
+                        edge_id = str(value.get("edge_id", edge_id))
+                    else:
+                        image = value
+                        note = ""
+
+                    if image is not None:
+                        normalized.append({
+                            "edge_id": str(edge_id),
+                            "image": image,
+                            "note": note,
+                        })
+
+            else:
+                # Single crop/image. Attach to first edge if possible.
+                edge_id = action_variants[0]["edge_id"] if action_variants else "0"
+                normalized.append({
+                    "edge_id": str(edge_id),
+                    "image": action_crops,
+                    "note": "",
+                })
+
+            return normalized
+
+        def ensure_schema(output, action_variants):
+            if not isinstance(output, dict):
+                output = {}
+
+            obs = output.setdefault("transition_group_observation", {})
+
+            obs.setdefault("source_active_surface_summary", "")
+            obs.setdefault("target_active_surface_summary", "")
+            obs.setdefault("overall_transition_summary", "")
+
+            obs.setdefault("transition_type_candidates", [])
+            obs.setdefault("action_variants", [])
+            obs.setdefault("target_context_bridge", {})
+            obs.setdefault("local_ambiguity", [])
+            obs.setdefault("interpretation_reliability", {})
+
+            obs["target_context_bridge"].setdefault("context_carried_from_source", "")
+            obs["target_context_bridge"].setdefault("target_disambiguation_hint", "")
+            obs["target_context_bridge"].setdefault("evidence", [])
+            obs["target_context_bridge"].setdefault("uncertainty", [])
+
+            obs["interpretation_reliability"].setdefault("level", "medium")
+            obs["interpretation_reliability"].setdefault("reason", "")
+
+            # If the model omitted action variants, create safe defaults.
+            if not obs["action_variants"]:
+                for variant in action_variants:
+                    obs["action_variants"].append({
+                        "edge_id": variant.get("edge_id", ""),
+                        "action_description": variant.get("action_description", ""),
+                        "variant_group": "unclear",
+                        "matched_source_element": "",
+                        "source_region": "unknown",
+                        "source_visual_container": "unknown",
+                        "local_action_meaning": "",
+                        "executable_action_signature": {
+                            "primary_instruction": variant.get("action_description", ""),
+                            "target_label": "",
+                            "target_icon_description": "",
+                            "target_region": "",
+                            "nearby_visual_anchors": [],
+                            "state_or_selection_cue": "",
+                            "fallback_instruction": "",
+                            "do_not_confuse_with": [],
+                        },
+                        "distinction_from_other_variants": "",
+                    })
+
+            # Ensure nested executable_action_signature exists.
+            for item in obs["action_variants"]:
+                item.setdefault("edge_id", "")
+                item.setdefault("action_description", "")
+                item.setdefault("variant_group", "unclear")
+                item.setdefault("matched_source_element", "")
+                item.setdefault("source_region", "unknown")
+                item.setdefault("source_visual_container", "unknown")
+                item.setdefault("local_action_meaning", "")
+                item.setdefault("distinction_from_other_variants", "")
+
+                sig = item.setdefault("executable_action_signature", {})
+                sig.setdefault("primary_instruction", item.get("action_description", ""))
+                sig.setdefault("target_label", "")
+                sig.setdefault("target_icon_description", "")
+                sig.setdefault("target_region", "")
+                sig.setdefault("nearby_visual_anchors", [])
+                sig.setdefault("state_or_selection_cue", "")
+                sig.setdefault("fallback_instruction", "")
+                sig.setdefault("do_not_confuse_with", [])
+
+            return output
+
+        source_node_observation = unwrap_node_observation(source_node_level_information)
+        target_node_observation = unwrap_node_observation(target_node_level_information)
+
+        action_variants = normalize_edge_data(edge_data)
+        crop_items = normalize_action_crops(action_crops, action_variants)
+
+        source_text = normalize_json_like(source_node_observation)
+        target_text = normalize_json_like(target_node_observation)
+        actions_text = normalize_json_like(action_variants)
+
+        system_prompt = """
+    You are a mobile UI transition-group observation module.
+
+    You are given:
+    - a source node observation
+    - a target node observation
+    - one or more action descriptions collected during exploration that all moved from the same source node to the same target node
+    - optional visual evidence showing action crops or annotated source screenshots
+
+    Your task is to interpret this source-to-target transition group.
+
+    The action descriptions may be duplicate descriptions of the same control, label/icon variants of the same control, alternative controls that reach the same target, dismiss/back variants, scroll variants, or genuinely different actions that happen to reach the same target.
+
+    Preserve every raw action as an action_variant.
+    Summarize the shared source-to-target transition once at the group level.
+
+    Visual evidence may contain annotations such as boxes, markers, arrows, or highlights. These annotations are not app UI content. Use them only to identify the action target or interacted region.
+
+    Do not generate user intents.
+    Do not generate final navigation plans.
+    Do not decide whether this transition is globally stable, noisy, useful, or canonical.
+    Do not decide whether this transition should be used in the final route.
+
+    For each action_variant, preserve execution-useful detail in executable_action_signature. The final planner may keep only one action variant, so the signature must contain enough information for an executor to perform the action without seeing the original edge.
+
+    Return JSON only using the requested schema. Do not add extra fields.
+    """.strip()
+
+        user_prompt = f"""
+    Source node observation:
+    {source_text}
+
+    Target node observation:
+    {target_text}
+
+    Action variants from source node to target node:
+    {actions_text}
+
+    Return JSON with exactly this schema:
+
+    {{
+    "transition_group_observation": {{
+        "source_active_surface_summary": "short summary of the source active surface",
+        "target_active_surface_summary": "short summary of the target active surface",
+
+        "overall_transition_summary": "what this source-to-target transition appears to do locally",
+
+        "transition_type_candidates": [
+        {{
+            "transition_type": "switches_tab | opens_detail | opens_list | opens_editor | opens_settings | opens_menu | opens_overlay | dismisses_surface | navigates_back | scrolls_or_reveals | changes_filter_or_subtab | reselects_current_tab_or_refreshes_feed | same_surface_content_change | unknown",
+            "confidence": 0.0,
+            "evidence": "why this transition type is plausible"
+        }}
+        ],
+
+        "action_variants": [
+        {{
+            "edge_id": "copy edge_id from input action variant",
+            "action_description": "copy the raw action description",
+            "variant_group": "same_control | same_region | alternative_control | icon_label_variant | back_or_dismiss_variant | scroll_variant | unclear",
+            "matched_source_element": "source element/control/row/icon if identifiable",
+            "source_region": "top_bar | main_area | bottom_nav | overlay | unknown",
+            "source_visual_container": "toolbar | tab_bar | page_header | section_header | list_row | settings_row | content_card | feed_post_content | banner_or_prompt | form_field | modal_content | background_page | unknown",
+            "local_action_meaning": "what this action appears to do locally",
+
+            "executable_action_signature": {{
+            "primary_instruction": "robust executable instruction for this exact action",
+            "target_label": "visible text label, else empty string",
+            "target_icon_description": "icon description if icon-based, else empty string",
+            "target_region": "short region description, such as top-right toolbar or bottom-left bottom navigation",
+            "nearby_visual_anchors": [
+                "nearby stable visual cues"
+            ],
+            "state_or_selection_cue": "selected/unchecked/expanded/etc. if relevant, else empty string",
+            "fallback_instruction": "alternative instruction if label/icon is partially visible",
+            "do_not_confuse_with": [
+                "similar nearby controls or regions to avoid"
+            ]
+            }},
+
+            "distinction_from_other_variants": "how this action differs from other variants, or empty string if equivalent"
+        }}
+        ],
+
+        "target_context_bridge": {{
+        "context_carried_from_source": "source-side context that should be remembered when interpreting the target, if any",
+        "target_disambiguation_hint": "how the source action/context helps explain the target node; empty string if the target is already self-explanatory",       
+        "evidence": [
+            "specific evidence supporting this bridge"
+        ],
+        "uncertainty": [
+            "what is still uncertain about this bridge"
+        ]
+        }},
+
+        "local_ambiguity": [
+        "ambiguities that cannot be resolved from this transition group alone"
+        ],
+
+        "interpretation_reliability": {{
+        "level": "high | medium | low",
+        "reason": "short reason"
+        }}
+    }}
+    }}
+
+    Guidelines:
+    - Interpret only this source-to-target transition group.
+    - Preserve every action variant.
+    - Summarize the transition once at the group level.
+    - Do not produce user intents.
+    - Do not produce final route plans.
+    - Do not say whether this transition is canonical or should be avoided.
+    - If source context gives meaning to an otherwise generic target page, capture that in target_context_bridge.
+    - If the target page is self-explanatory and the source adds no useful context, leave target_disambiguation_hint empty.
+    - Keep icon and region details when they matter for execution, such as gear/settings icon, pencil/edit icon, overflow menu, bottom tab, search field, profile avatar, or toolbar button.
+    - Do not overgeneralize icon actions. For example, write "tap the gear/settings icon in the top-right toolbar" rather than only "open settings."
+    - Do not copy internal metadata such as order_index, boundingBox, node ids, or coordinates into human-readable fields.
+    - Use bounding boxes or order indices only to infer visual region or action target; do not mention them in the output.
+    - local_ambiguity must describe ambiguity about the transition itself, not generic variability of feed/content items.
+    - If there is no meaningful uncertainty, use an empty list [].
+    - Do not write placeholder uncertainty such as "None", "None significant", "N/A", or "No ambiguity".
+    - context_carried_from_source should describe the source-side action context, not just the previous page.
+    Example: write "The Video bottom-navigation tab was selected" rather than "The user was previously on Home."
+    - Return valid JSON only.
+    """.strip()
+
+        user_content = [{"text": user_prompt}]
+
+        # Add action crop images as optional visual evidence.
+        # Use lower/other screenshot settings because these are supporting evidence, not target-page screenshots.
+        max_side = 280
+        quality = self.configs.post_process.vlm_processing_img_quality_for_other_screenshots
+
+        for i, item in enumerate(crop_items):
+            edge_id = item["edge_id"]
+            note = item.get("note", "")
+
+            try:
+                _, _, data_uri = resize_and_encode_to_base64(
+                    item["image"],
+                    target_size=max_side,
+                    jpeg_quality=quality,
+                )
+            except Exception as exc:
+                # Do not fail the whole transition if one crop cannot be encoded.
+                user_content.append({
+                    "text": (
+                        f"Visual evidence for edge_id={edge_id} could not be encoded: {exc}"
+                    )
+                })
+                continue
+
+            user_content.append({
+                "text": (
+                    f"Visual evidence {i + 1}/{len(crop_items)} for edge_id={edge_id}. "
+                    "This image may contain action annotations. "
+                    "Annotations are not app UI content; use them only to identify the action target. "
+                    f"Note: {note}"
+                )
+            })
+            user_content.append({"image": data_uri})
+
+        messages = [
+            {
+                "role": "system",
+                "content": [{"text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": user_content,
+            },
+        ]
+
+        model_name = self._post_process_model_for_transition_info()
+
+        response = self._multimodal_conversation_call(
+            model=model_name,
+            messages=messages,
+            response_format={"type": "json_object"},
+            vl_high_resolution_images=True,
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        raw = response.output.choices[0].message.content
+        raw_text = (
+            "".join(
+                item.get("text", "")
+                for item in raw
+                if isinstance(item, dict)
+            ).strip()
+            if isinstance(raw, list)
+            else str(raw or "").strip()
+        )
+
+        output = parse_json_from_model_response(raw_text)
+
+        return ensure_schema(output, action_variants)

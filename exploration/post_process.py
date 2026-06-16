@@ -157,7 +157,7 @@ def resolve_enhanced_page_summary(path_node_id, node_intents, nx_graph):
     }
 
 
-def build_paths_for_node(nx_graph, node_id, node_intents, logs_root):
+def build_paths_for_node(nx_graph, node_id, logs_root):
     root_node_ids = [node_id for node_id, node in nx_graph.nodes(data=True) if node.get("is_root", False)]
     paths = dict()
     for root_node_id in root_node_ids:
@@ -167,14 +167,12 @@ def build_paths_for_node(nx_graph, node_id, node_intents, logs_root):
             continue
 
         screenshots = []
-        enhanced_page_summaries = []
+        page_summaries = []
         actions = []
         for i, node in enumerate(node_path):
             screenshot = cv2.imread(os.path.join(logs_root, "screenshots", node + ".jpg"))
             screenshots.append(screenshot)
-            enhanced_page_summaries.append(
-                resolve_enhanced_page_summary(node, node_intents, nx_graph)
-            )
+            page_summaries.append(nx_graph.nodes[node].get("page_summary", ""))
             if i < len(node_path) - 1:
                 screenshots[i] = visualize_edge_on_screenshot(
                     screenshots[i],
@@ -188,7 +186,7 @@ def build_paths_for_node(nx_graph, node_id, node_intents, logs_root):
 
         paths[root_node_id] = {
             "screenshots": screenshots,
-            "enhanced_page_summaries": enhanced_page_summaries,
+            "page_summaries": page_summaries,
             "actions": actions,
         }
 
@@ -234,6 +232,149 @@ def normalize_clustered_navigation_plans(navigation_plans, input_root_ids=None, 
 
     return normalized
 
+
+def _process_node_level_information(node_id, nx_graph, vlm_client, logs_root):
+    paths = build_paths_for_node(nx_graph, node_id, logs_root)
+    if not paths:
+        return None
+
+    out_edges_all = [
+        attrs["description"]
+        for _, _, attrs in nx_graph.out_edges(node_id, data=True)
+    ]
+
+    img = cv2.imread(os.path.join(logs_root, "screenshots", node_id + ".jpg"))
+    page_summary = nx_graph.nodes[node_id].get("page_summary", "")
+
+    out = vlm_client.get_node_level_information(img, page_summary, out_edges_all)
+    
+    return node_id, out["node_observation"]
+
+
+def save_node_level_information(nx_graph, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    node_level_information_path = os.path.join(logs_root, "node_level_information.json")
+
+
+    if os.path.exists(node_level_information_path):
+        with open(node_level_information_path, "r", encoding="utf-8") as f:
+            try:
+                node_level_information = json.load(f)
+            except json.JSONDecodeError:
+                node_level_information = {}
+    else:
+        node_level_information = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 4) or 4)
+    write_lock = threading.Lock()
+    node_ids = list(nx_graph.nodes())
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_node_level_information,
+                node_id,
+                nx_graph,
+                vlm_client,
+                logs_root,
+            ): node_id
+            for node_id in node_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process nodes"):
+            node_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for node {node_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                node_level_information[node_id] = entry
+                with open(node_level_information_path, "w", encoding="utf-8") as f:
+                    json.dump(node_level_information, f, ensure_ascii=False, indent=4)
+
+    return node_level_information
+
+def _process_edge_level_information(edge_id, node_level_information, nx_graph, vlm_client, logs_root, dbg):
+
+    source_id, target_id = edge_id
+    source_id = str(source_id)
+    target_id = str(target_id)
+
+    edge_data = nx_graph.get_edge_data(source_id, target_id)
+    source_node_level_information = node_level_information.get(source_id, {})
+    target_node_level_information = node_level_information.get(target_id, {})
+
+    source_screenshot = cv2.imread(os.path.join(logs_root, "screenshots", source_id + ".jpg"))
+    action_crops = []
+    for edge_key, edge_attrs in edge_data.items():
+        if 'boundingBox' in edge_attrs.keys():
+            x1, y1, x2, y2 = edge_attrs['boundingBox']
+            action = source_screenshot[y1:y2, x1:x2]
+            action_crops.append(action)
+
+    transition_info = vlm_client.get_transition_info(action_crops, edge_data, source_node_level_information, target_node_level_information)
+
+
+    return edge_id, transition_info['transition_group_observation']
+
+
+
+def save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    edge_level_information_path = os.path.join(logs_root, "edge_level_information.json")
+
+    if os.path.exists(edge_level_information_path):
+        with open(edge_level_information_path, "r", encoding="utf-8") as f:
+            edge_level_information = json.load(f)
+    else:
+        edge_level_information = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
+    write_lock = threading.Lock()
+    edge_ids = list(nx_graph.edges())
+
+
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_edge_level_information,
+                edge_id,
+                node_level_information,
+                nx_graph,
+                vlm_client,
+                logs_root, dbg
+            ): edge_id
+            for edge_id in edge_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process edges"):
+            edge_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for edge {edge_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                key = f"{edge_id[0]}|{edge_id[1]}"
+                edge_level_information[key] = entry
+                with open(edge_level_information_path, "w", encoding="utf-8") as f:
+                    json.dump(edge_level_information, f, ensure_ascii=False, indent=4)
+
+    return edge_level_information
 
 def _process_node_intents(node_id, nx_graph, vlm_client, logs_root):
     paths = build_paths_for_node(nx_graph, node_id, {}, logs_root)
@@ -364,8 +505,6 @@ def save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
     max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
     write_lock = threading.Lock()
     node_ids = list(nx_graph.nodes())
-
-    node_ids = list(filter(lambda x: '07d6' in x, node_ids))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -541,18 +680,26 @@ if __name__ == "__main__":
 
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
-    node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
-        node_intents = json.load(f)
-    dbg.log("Stage 1 complete: node_intents.json", color="green")
 
-    save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
-    dbg.log("Stage 2 complete: node_navigation_plans.json", color="green")
+    # node_level_information = save_node_level_information(nx_graph, vlm_client, configs, dbg)
 
-    add_node_embeddings_to_user_intents(
-        configs.logs.root, "graph.json", "node_intents.json", "node_intents.json"
-    )
-    dbg.log("Stage 3 complete: embeddings written to node_intents.json", color="green")
+    with open(os.path.join(configs.logs.root, "node_level_information.json"), "r", encoding="utf-8") as f:
+        node_level_information = json.load(f)
+
+    edge_level_information = save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg)
+
+    # node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
+    # with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
+    #     node_intents = json.load(f)
+    # dbg.log("Stage 1 complete: node_intents.json", color="green")
+
+    # save_node_navigation_plans(nx_graph, node_intents, vlm_client, configs, dbg)
+    # dbg.log("Stage 2 complete: node_navigation_plans.json", color="green")
+
+    # add_node_embeddings_to_user_intents(
+    #     configs.logs.root, "graph.json", "node_intents.json", "node_intents.json"
+    # )
+    # dbg.log("Stage 3 complete: embeddings written to node_intents.json", color="green")
 
 
     
