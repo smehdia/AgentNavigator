@@ -376,6 +376,189 @@ def save_edge_level_information(nx_graph, node_level_information, vlm_client, co
 
     return edge_level_information
 
+
+def compact_node_summary(node_info):
+    
+    summary = node_info.get("local_enhanced_summary", {})
+    active_surface = node_info.get("active_surface", {})
+    layout = node_info.get("layout_regions", {})
+
+    return {
+        "tag": summary.get("tag", ""),
+        "visible_surface_summary": summary.get("visible_surface_summary", ""),
+        "local_page_purpose": summary.get("local_page_purpose", ""),
+        "screen_type": summary.get("screen_type", ""),
+        "active_tab": summary.get("active_tab", None),
+        "active_subtab": summary.get("active_subtab", None),
+        "selected_navigation": summary.get("selected_navigation", None),
+        "surface_kind": active_surface.get("surface_kind", ""),
+        "is_overlay_active": active_surface.get("is_overlay_active", False),
+        "top_bar": layout.get("top_bar", ""),
+        "main_area": layout.get("main_area", ""),
+        "bottom_nav": layout.get("bottom_nav", ""),
+    }
+
+
+def compact_transition_info(transition_info):
+
+    return {
+        "source_active_surface_summary": transition_info.get("source_active_surface_summary", ""),
+        "target_active_surface_summary": transition_info.get("target_active_surface_summary", ""),
+        "overall_transition_summary": transition_info.get("overall_transition_summary", ""),
+        "transition_type_candidates": transition_info.get("transition_type_candidates", []),
+        "target_context_bridge": transition_info.get("target_context_bridge", {}),
+        "local_ambiguity": transition_info.get("local_ambiguity", []),
+        "interpretation_reliability": transition_info.get("interpretation_reliability", {}),
+    }
+
+def extract_action_signatures(transition_info):
+
+    signatures = []
+    for action in transition_info.get("action_variants", []):
+        sig = action.get("executable_action_signature", {})
+
+        signatures.append({
+            "edge_id": action.get("edge_id", ""),
+            "action_description": action.get("action_description", ""),
+            "matched_source_element": action.get("matched_source_element", ""),
+            "source_region": action.get("source_region", ""),
+            "source_visual_container": action.get("source_visual_container", ""),
+            "local_action_meaning": action.get("local_action_meaning", ""),
+            "primary_instruction": sig.get("primary_instruction", ""),
+            "target_label": sig.get("target_label", ""),
+            "target_icon_description": sig.get("target_icon_description", ""),
+            "target_region": sig.get("target_region", ""),
+            "nearby_visual_anchors": sig.get("nearby_visual_anchors", []),
+            "state_or_selection_cue": sig.get("state_or_selection_cue", ""),
+            "fallback_instruction": sig.get("fallback_instruction", ""),
+            "do_not_confuse_with": sig.get("do_not_confuse_with", []),
+        })
+
+    return signatures
+
+def prepare_path_information(path, node_level_information, edge_level_information):
+
+    path_steps = []
+    for i in range(len(path) - 1):
+        source_node_id = path[i]
+        target_node_id = path[i + 1]
+        edge_key = f"{source_node_id}|{target_node_id}"
+
+        transition_info = edge_level_information[edge_key]
+
+        path_steps.append({
+            "step_index": i,
+            "source_node_id": source_node_id,
+            "target_node_id": target_node_id,
+            "edge_key": edge_key,
+
+            # compact node context for path reasoning
+            "source_node_summary": compact_node_summary(
+                node_level_information[source_node_id]
+            ),
+            "target_node_summary": compact_node_summary(
+                node_level_information[target_node_id]
+            ),
+
+            # compact Pass 2 transition memory
+            "transition_info": compact_transition_info(transition_info),
+
+            # keep action details for final plan later
+            "candidate_action_signatures": extract_action_signatures(transition_info),
+        })
+
+    trajectory = {
+        "root_node_id": path[0],
+        "target_node_id": path[-1],
+        "node_sequence": path,
+
+        # full final target info only once
+        "target_node_information": node_level_information[path[-1]],
+
+        # optional compact summaries
+        "root_node_summary": compact_node_summary(
+            node_level_information[path[0]]
+        ),
+        "target_node_summary": compact_node_summary(
+            node_level_information[path[-1]]
+        ),
+
+        "path_steps": path_steps,
+    }
+
+    return trajectory
+
+
+def _process_path_goals(node_id, node_level_information, edge_level_information, nx_graph, vlm_client, logs_root, dbg):
+
+    root_node_ids = [node_id for node_id, node in nx_graph.nodes(data=True) if node.get("is_root", False)]
+
+    paths = []
+    for root in root_node_ids:
+        try:
+            temp_paths = list(nx.all_shortest_paths(nx_graph, source=root, target=node_id))
+            paths.extend(temp_paths)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pass
+
+    path_goals = {}
+    for i,path in enumerate(paths):
+        dbg.log(f"Processing path {i} of {len(paths)}", color="green")
+        trajectory = prepare_path_information(path, node_level_information, edge_level_information)
+        output = vlm_client.get_path_conditioned_goals(trajectory)
+        path_goals[str(i)] = output['path_conditioned_target_memory']
+
+    return node_id, path_goals
+
+def save_path_goals(nx_graph, node_level_information, edge_level_information, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    path_goals_path = os.path.join(logs_root, "path_goals.json")
+
+    if os.path.exists(path_goals_path):
+        with open(path_goals_path, "r", encoding="utf-8") as f:
+            path_goals = json.load(f)
+    else:
+        path_goals = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 1) or 1)
+    write_lock = threading.Lock()
+    node_ids = list(nx_graph.nodes())
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_path_goals,
+                node_id,
+                node_level_information,
+                edge_level_information,
+                nx_graph,
+                vlm_client,
+                logs_root,
+                dbg
+            ): node_id
+            for node_id in node_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process nodes"):
+            node_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for node {node_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                path_goals[node_id] = entry
+                with open(path_goals_path, "w", encoding="utf-8") as f:
+                    json.dump(path_goals, f, ensure_ascii=False, indent=4)
+
+    return path_goals
+
 def _process_node_intents(node_id, nx_graph, vlm_client, logs_root):
     paths = build_paths_for_node(nx_graph, node_id, {}, logs_root)
     if not paths:
@@ -459,10 +642,7 @@ def _process_node_navigation_plans(node_id, node_intents, nx_graph, vlm_client, 
     if not paths:
         return None
 
-    print(paths)
-
     
-
     paths = {
         root_id: bundle
         for root_id, bundle in sorted(
@@ -686,7 +866,17 @@ if __name__ == "__main__":
     with open(os.path.join(configs.logs.root, "node_level_information.json"), "r", encoding="utf-8") as f:
         node_level_information = json.load(f)
 
-    edge_level_information = save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg)
+    # edge_level_information = save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg)
+
+    with open(os.path.join(configs.logs.root, "edge_level_information.json"), "r", encoding="utf-8") as f:
+        edge_level_information = json.load(f)
+
+
+    path_goals = save_path_goals(nx_graph, node_level_information, edge_level_information, vlm_client, configs, dbg)
+    with open(os.path.join(configs.logs.root, "path_goals.json"), "w", encoding="utf-8") as f:
+        json.dump(path_goals, f, ensure_ascii=False, indent=4)
+    dbg.log("Stage 4 complete: path_goals.json", color="green")
+
 
     # node_intents = save_node_intents(nx_graph, vlm_client, configs, dbg)
     # with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:

@@ -2788,3 +2788,483 @@ class VLM:
             ) from exc
 
         return ensure_schema(output, action_variants)
+
+    def get_path_conditioned_goals(self, trajectory):
+        """
+        Pass 3A: Compact path-conditioned target memory.
+
+        Input:
+            trajectory = output of prepare_path_information(...)
+
+        Output:
+            {
+                "path_conditioned_target_memory": {
+                    ...
+                }
+            }
+
+        This pass:
+        - interprets the final target node using one trajectory
+        - generates compact path-conditioned user intents/goals
+        - assesses whether this trajectory should influence target memory
+        - marks important vs weak/incidental steps
+
+        This pass does NOT:
+        - generate final executable navigation plan
+        - choose the best route
+        - merge multiple trajectories
+        """
+        import json
+        import re
+        import dashscope
+
+        def normalize_json_like(obj):
+            try:
+                return json.dumps(obj, ensure_ascii=False, indent=2)
+            except Exception:
+                return str(obj)
+
+        def extract_response_text(response):
+            content = response.output.choices[0].message.content
+
+            if isinstance(content, list):
+                text = "".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict)
+                )
+            else:
+                text = content
+
+            text = text.strip()
+
+            if text.startswith("```json"):
+                text = text.removeprefix("```json").removesuffix("```").strip()
+            elif text.startswith("```"):
+                text = text.removeprefix("```").removesuffix("```").strip()
+
+            return text
+
+        def ensure_schema(output, trajectory):
+            if not isinstance(output, dict):
+                output = {}
+
+            # Backward compatibility: if model returns old verbose key, map it.
+            if "path_conditioned_target_memory" not in output:
+                if "path_conditioned_target_info" in output:
+                    old = output["path_conditioned_target_info"]
+                    output["path_conditioned_target_memory"] = {
+                        "trajectory_id": old.get("trajectory_id", ""),
+                        "root_node_id": old.get("root_node_id", ""),
+                        "target_node_id": old.get("target_node_id", ""),
+                        "path_length": old.get("path_length", 0),
+                        "target_tag": old.get("conditioned_target_summary", {}).get("tag", ""),
+                        "path_summary": old.get("path_summary", ""),
+                        "conditioned_target_summary": old.get("conditioned_target_summary", {}).get(
+                            "conditioned_page_summary", ""
+                        ),
+                        "conditioned_target_purpose": old.get("conditioned_target_summary", {}).get(
+                            "conditioned_page_purpose", ""
+                        ),
+                        "target_entity_or_scope": old.get("conditioned_target_summary", {}).get(
+                            "target_entity_or_scope", ""
+                        ),
+                        "screen_type": old.get("conditioned_target_summary", {}).get(
+                            "screen_type", "unknown"
+                        ),
+                        "supported_user_intents": [
+                            {
+                                "intent": item.get("intent", ""),
+                                "intent_type": item.get("intent_type", "unknown"),
+                                "confidence": item.get("confidence", 0.0),
+                            }
+                            for item in old.get("path_conditioned_user_intents", [])
+                        ],
+                        "trajectory_assessment": old.get("trajectory_assessment", {}),
+                        "important_steps": [
+                            {
+                                "step_index": item.get("step_index", 0),
+                                "meaning": item.get("why_it_matters", ""),
+                            }
+                            for item in old.get("trajectory_semantics", {}).get(
+                                "key_disambiguating_steps", []
+                            )
+                        ],
+                        "weak_or_incidental_steps": [
+                            {
+                                "step_index": item.get("step_index", 0),
+                                "reason": item.get("reason", ""),
+                            }
+                            for item in (
+                                old.get("trajectory_semantics", {}).get(
+                                    "weak_or_nonsemantic_steps", []
+                                )
+                                + old.get("trajectory_semantics", {}).get(
+                                    "possible_incidental_steps", []
+                                )
+                            )
+                        ],
+                        "retrieval_text": {
+                            "summary": old.get("retrieval_text", {}).get(
+                                "expanded_retrieval_summary",
+                                old.get("retrieval_text", {}).get(
+                                    "short_retrieval_summary", ""
+                                ),
+                            ),
+                            "keywords": old.get("retrieval_text", {}).get("keywords", []),
+                        },
+                        "remaining_ambiguity": old.get("target_disambiguation", {}).get(
+                            "what_remains_ambiguous", []
+                        ),
+                    }
+                else:
+                    output["path_conditioned_target_memory"] = {}
+
+            memory = output.setdefault("path_conditioned_target_memory", {})
+
+            memory.setdefault("trajectory_id", trajectory.get("trajectory_id", ""))
+            memory.setdefault("root_node_id", trajectory.get("root_node_id", ""))
+            memory.setdefault("target_node_id", trajectory.get("target_node_id", ""))
+            memory.setdefault(
+                "path_length",
+                trajectory.get(
+                    "path_length",
+                    max(0, len(trajectory.get("node_sequence", [])) - 1),
+                ),
+            )
+
+            memory.setdefault("target_tag", "")
+            memory.setdefault("path_summary", "")
+            memory.setdefault("conditioned_target_summary", "")
+            memory.setdefault("conditioned_target_purpose", "")
+            memory.setdefault("target_entity_or_scope", "")
+            memory.setdefault("screen_type", "unknown")
+
+            memory.setdefault("supported_user_intents", [])
+
+            assessment = memory.setdefault("trajectory_assessment", {})
+            assessment.setdefault("trajectory_role", "ambiguous")
+            assessment.setdefault("should_contribute_to_target_memory", True)
+            assessment.setdefault("memory_weight", 0.5)
+            assessment.setdefault("reason", "")
+
+            memory.setdefault("important_steps", [])
+            memory.setdefault("weak_or_incidental_steps", [])
+
+            retrieval = memory.setdefault("retrieval_text", {})
+            retrieval.setdefault("summary", "")
+            retrieval.setdefault("keywords", [])
+
+            memory.setdefault("remaining_ambiguity", [])
+
+            return output
+
+        def clean_output(output):
+            memory = output.get("path_conditioned_target_memory", {})
+
+            placeholder_strings = {
+                "none",
+                "none.",
+                "n/a",
+                "not applicable",
+                "not applicable.",
+                "no ambiguity",
+                "no ambiguity.",
+                "none significant",
+                "none significant.",
+            }
+
+            def clean_list(values):
+                if not isinstance(values, list):
+                    return []
+
+                cleaned = []
+                for value in values:
+                    if isinstance(value, str):
+                        normalized = value.strip().lower()
+                        if normalized in placeholder_strings:
+                            continue
+                        if normalized.startswith("none significant"):
+                            continue
+                    cleaned.append(value)
+
+                return cleaned
+
+            def remove_internal_metadata(text):
+                if not isinstance(text, str):
+                    return text
+
+                text = re.sub(r"\s*\(order_index\s*:\s*\d+\)", "", text)
+                text = re.sub(r"\s*\[order_index\s*:\s*\d+\]", "", text)
+                text = re.sub(r"\s*\(boundingBox\s*:\s*\[[^\]]+\]\)", "", text)
+                text = re.sub(r"\s*\[boundingBox\s*:\s*\[[^\]]+\]\]", "", text)
+                return text.strip()
+
+            # Clamp memory weight.
+            assessment = memory.get("trajectory_assessment", {})
+            try:
+                weight = float(assessment.get("memory_weight", 0.5))
+                assessment["memory_weight"] = max(0.0, min(1.0, weight))
+            except Exception:
+                assessment["memory_weight"] = 0.5
+
+            # Normalize boolean if model returns string.
+            val = assessment.get("should_contribute_to_target_memory", True)
+            if isinstance(val, str):
+                assessment["should_contribute_to_target_memory"] = (
+                    val.strip().lower() in {"true", "yes", "1"}
+                )
+
+            # Clean text fields.
+            for key in [
+                "target_tag",
+                "path_summary",
+                "conditioned_target_summary",
+                "conditioned_target_purpose",
+                "target_entity_or_scope",
+                "screen_type",
+            ]:
+                memory[key] = remove_internal_metadata(memory.get(key, ""))
+
+            # Clean intents.
+            cleaned_intents = []
+            for item in memory.get("supported_user_intents", []):
+                if not isinstance(item, dict):
+                    continue
+
+                item["intent"] = remove_internal_metadata(item.get("intent", ""))
+                item.setdefault("intent_type", "unknown")
+
+                try:
+                    item["confidence"] = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
+                except Exception:
+                    item["confidence"] = 0.0
+
+                if item["intent"]:
+                    cleaned_intents.append(item)
+
+            memory["supported_user_intents"] = cleaned_intents
+
+            # Clean steps.
+            for step_key in ["important_steps", "weak_or_incidental_steps"]:
+                cleaned_steps = []
+                for step in memory.get(step_key, []):
+                    if not isinstance(step, dict):
+                        continue
+                    step.setdefault("step_index", 0)
+                    if "meaning" in step:
+                        step["meaning"] = remove_internal_metadata(step.get("meaning", ""))
+                    if "reason" in step:
+                        step["reason"] = remove_internal_metadata(step.get("reason", ""))
+                    cleaned_steps.append(step)
+                memory[step_key] = cleaned_steps
+
+            # Clean retrieval text.
+            retrieval = memory.get("retrieval_text", {})
+            retrieval["summary"] = remove_internal_metadata(retrieval.get("summary", ""))
+            retrieval["keywords"] = clean_list(retrieval.get("keywords", []))
+
+            memory["remaining_ambiguity"] = clean_list(memory.get("remaining_ambiguity", []))
+
+            return output
+
+        if not trajectory:
+            raise ValueError("trajectory is empty or None")
+
+        if not trajectory.get("target_node_id"):
+            raise ValueError("trajectory must contain target_node_id")
+
+        if "path_steps" not in trajectory:
+            raise ValueError("trajectory must contain path_steps")
+
+        node_sequence = trajectory.get("node_sequence", [])
+        path_length = trajectory.get("path_length", max(0, len(node_sequence) - 1))
+
+        trajectory_for_prompt = {
+            "trajectory_id": trajectory.get(
+                "trajectory_id",
+                f"{trajectory.get('target_node_id', '')}::path",
+            ),
+            "root_node_id": trajectory.get("root_node_id", ""),
+            "target_node_id": trajectory.get("target_node_id", ""),
+            "node_sequence": node_sequence,
+            "path_length": path_length,
+
+            # Include this if you added loop/repetition analysis earlier.
+            "trajectory_structure": trajectory.get("trajectory_structure", {}),
+
+            "root_node_summary": trajectory.get("root_node_summary", {}),
+            "target_node_summary": trajectory.get("target_node_summary", {}),
+
+            # Full final target node information only once.
+            "target_node_information": trajectory.get("target_node_information", {}),
+
+            # Path steps are already compact.
+            "path_steps": trajectory.get("path_steps", []),
+        }
+
+        system_prompt = """
+    You are a mobile UI path-conditioned target memory module.
+
+    You are given one trajectory from a root node to a final target node.
+
+    The input includes:
+    - full node-level information for the final target node
+    - compact root/target summaries
+    - compact path steps
+    - transition information for each step
+    - candidate executable action signatures for each step
+    - optional trajectory_structure describing loops, repeated nodes, repeated edges, or backtracking
+
+    Your task is to create compact path-conditioned memory for the final target node.
+
+    Do not produce a long debug report.
+    Do not generate the final executable navigation plan.
+    Do not choose the globally best route.
+    Do not merge this trajectory with other trajectories.
+    Do not reject strange trajectories automatically; classify their semantic role.
+
+    The output will be stored for retrieval and later route distillation.
+
+    Preserve only:
+    - conditioned meaning of the target
+    - user intents/goals supported by the target
+    - trajectory assessment and memory weight
+    - important steps versus weak/incidental steps
+    - compact retrieval text
+
+    Return JSON only using the requested schema. Do not add extra fields.
+    """.strip()
+
+        user_prompt = f"""
+    Trajectory input:
+    {normalize_json_like(trajectory_for_prompt)}
+
+    Return JSON with exactly this compact schema:
+
+    {{
+    "path_conditioned_target_memory": {{
+        "trajectory_id": "copy from input",
+        "root_node_id": "copy from input",
+        "target_node_id": "copy from input",
+        "path_length": 0,
+
+        "target_tag": "short target name, max 6 words",
+        "path_summary": "one concise sentence describing the route context",
+        "conditioned_target_summary": "one or two sentences interpreting the target using this path",
+        "conditioned_target_purpose": "what the target page supports",
+        "target_entity_or_scope": "specific feature, section, account, setting, item, or category represented by the target",
+        "screen_type": "profile | settings | feed | list | detail | editor | search | modal | tab | store | keyboard_surface | external_surface | unknown",
+
+        "supported_user_intents": [
+        {{
+            "intent": "short user-facing goal this target can satisfy",
+            "intent_type": "navigate_to_section | view_information | edit_information | configure_setting | search_or_filter | create_content | manage_account | inspect_item | browse_store | use_tool | recover_or_reset | unknown",
+            "confidence": 0.0
+        }}
+        ],
+
+        "trajectory_assessment": {{
+        "trajectory_role": "target_disambiguating | valid_alternative | valid_but_redundant | weak_nonsemantic | recovery_only | likely_incidental | node_only | ambiguous",
+        "should_contribute_to_target_memory": true,
+        "memory_weight": 0.0,
+        "reason": "one concise reason"
+        }},
+
+        "important_steps": [
+        {{
+            "step_index": 0,
+            "meaning": "why this step matters for interpreting or reaching the target"
+        }}
+        ],
+
+        "weak_or_incidental_steps": [
+        {{
+            "step_index": 0,
+            "reason": "why this step is weak, redundant, incidental, cross-surface, or unrelated"
+        }}
+        ],
+
+        "retrieval_text": {{
+        "summary": "compact retrieval text containing target purpose, route context, and main intents",
+        "keywords": [
+            "important retrieval terms"
+        ]
+        }},
+
+        "remaining_ambiguity": [
+        "only real unresolved ambiguity; empty list if none"
+        ]
+    }}
+    }}
+
+    Guidelines:
+    - Be concise.
+    - Do not include long evidence lists.
+    - Generate intents only for the final target node.
+    - User intents must be path-conditioned, not generic.
+    - Mark only the semantically important steps in important_steps.
+    - Mark noisy, redundant, refresh-like, loop-like, keyboard-surface, external-surface, or unrelated steps in weak_or_incidental_steps.
+    - Use trajectory_structure, if present, to identify loops or repeated-node behavior.
+    - Do not automatically reject a path with loops or incidental steps; classify it.
+    - trajectory_assessment.memory_weight:
+    - 0.8 to 1.0 = strong target-disambiguating route
+    - 0.5 to 0.8 = valid alternative with some noise
+    - 0.2 to 0.5 = weak/redundant route
+    - 0.0 to 0.2 = likely incidental route
+    - Use should_contribute_to_target_memory=false only if the trajectory is likely incidental or not useful for target interpretation.
+    - retrieval_text.summary should be optimized for semantic retrieval.
+    - Return valid JSON only.
+    """.strip()
+
+        messages = [
+            {
+                "role": "system",
+                "content": [{"text": system_prompt}],
+            },
+            {
+                "role": "user",
+                "content": [{"text": user_prompt}],
+            },
+        ]
+
+        if hasattr(self, "_post_process_model_for_path_conditioned_goals"):
+            model_name = self._post_process_model_for_path_conditioned_goals()
+        elif hasattr(self, "_post_process_model_for_transition_info"):
+            model_name = self._post_process_model_for_transition_info()
+        elif hasattr(self, "_post_process_model_for_node_level_information"):
+            model_name = self._post_process_model_for_node_level_information()
+        else:
+            model_name = self._post_process_model_for_node_intents()
+
+        response = dashscope.MultiModalConversation.call(
+            model=model_name,
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Path-conditioned-goals call failed: "
+                f"status_code={response.status_code} "
+                f"code={getattr(response, 'code', None)} "
+                f"message={getattr(response, 'message', None)}"
+            )
+
+        text = extract_response_text(response)
+
+        try:
+            output = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Failed to parse path-conditioned-goals response as JSON.\n"
+                f"Raw response:\n{text}"
+            ) from exc
+
+        output = ensure_schema(output, trajectory_for_prompt)
+        output = clean_output(output)
+
+        return output
