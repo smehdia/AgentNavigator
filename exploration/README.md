@@ -5,7 +5,7 @@ Automated mobile app exploration: vision-language **agents** act on a device, a 
 **Inference preparation is a two-phase pipeline:**
 
 1. **Exploration** (`explore.py`) — grow `graph.json`, per-node screenshots, and `app_graph.pkl` under `logs.root`.
-2. **Post-processing** (`post_process.py`) — read that graph and produce **`node_intents.json`** and **`node_navigation_plans.json`** in three stages: **Stage 1** generates ranked **user intents** and **enhanced page summaries** (multimodal VLM on the primary root→node path); **Stage 2** generates clustered **navigation plans** (`ui_navigation_memory`, text-only VLM per root path, up to 3 roots) in a separate file; **Stage 3** embeds each node for retrieval with **BGE-M3** (`embedding` + `embedding_text`) into `node_intents.json`.
+2. **Post-processing** (`post_process.py`) — read that graph and produce structured artifacts for inference: **node-level page descriptions**, **edge transition hints**, **ranked path intents**, **user intents**, **navigation plans**, and **BGE-M3 retrieval embeddings** (`user_intents.json`, `node_navigation_plans.json`, and intermediate JSON files under the same `logs.root`).
 
 You need a completed exploration run (same `logs.root` as in your YAML) before post-processing. Post-processing does not drive the device.
 
@@ -198,7 +198,7 @@ default:
 | | `action_matching_clip_similarity_threshold` | Live CLIP verify before tap |
 | **`logs`** | `root` | All outputs (graph, screenshots, `explore.log`) — **gitignored** as `explored_apps/` |
 | | `resume_from_checkpoint` | Load `app_graph.pkl` from `logs.root` if present |
-| **`post_process`** | `use_yibu_api`, `vlm_model_name_for_node_intents`, `vlm_model_name_for_node_navigation_plans`, `max_workers`, image size/quality keys | VLM for `post_process.py` — see [Post-processing](#post-processing-post_processpy) |
+| **`post_process`** | `use_yibu_api`, per-stage `vlm_model_name_for_*`, image size/quality for node/edge VLM calls, `max_workers` | VLM settings for `post_process.py` — see [Post-processing](#post-processing-post_processpy) |
 
 Full key reference: [Graph exploration → config tables](#graph-exploration), [Post-processing config](#post-processing-config-post_process-in-yaml).
 
@@ -269,7 +269,7 @@ Direct Python:
 python -u post_process.py --config configs/clock_android.yaml
 ```
 
-**Output:** `{logs.root}/node_intents.json`, `{logs.root}/node_navigation_plans.json`, and `{logs.root}/post_process.log` (when using the shell wrapper).
+**Output:** `{logs.root}/user_intents.json` (with embeddings), `{logs.root}/node_navigation_plans.json`, plus intermediate files (`node_level_information.json`, `edge_level_information.json`, `path_intents.json`) and `{logs.root}/post_process.log` when using the shell wrapper.
 
 Detail: [Post-processing](#post-processing-post_processpy).
 
@@ -277,35 +277,20 @@ Detail: [Post-processing](#post-processing-post_processpy).
 
 ## Post-processing (`post_process.py`)
 
-Turns an explored **app graph** into structured intents, navigation plans, and retrieval embeddings for downstream agents (intent matching, UI-TARS-style replay, etc.).
+Turns an explored **app graph** into page descriptions, transition metadata, path rankings, user intents, navigation plans, and retrieval embeddings for downstream inference.
 
-`post_process.py` runs **three stages** sequentially when invoked from the CLI:
+`post_process.py` runs **six VLM stages** plus **one embedding stage** in order. Each stage writes a JSON checkpoint under `logs.root` so you can resume or re-run later stages only (see commented calls in the `__main__` block).
 
-| Stage | Function | Purpose |
-|-------|----------|---------|
-| **Stage 1** | `save_node_intents` | VLM: **user intents** + **enhanced_page_summary** per node |
-| **Stage 2** | `save_node_navigation_plans` | VLM: clustered **ui_navigation_memory** per node (up to 3 root paths) |
-| **Stage 3** | `add_node_embeddings_to_user_intents` | BGE-M3: one **node-level embedding** for retrieval |
+| Stage | Function | Output file | VLM call |
+|-------|----------|-------------|----------|
+| **1** | `save_node_level_information` | `node_level_information.json` | `get_node_level_information` — multimodal page description per node |
+| **2** | `save_edge_level_information` | `edge_level_information.json` | `get_transition_info` — action clusters between adjacent nodes (optional action crops) |
+| **3** | `save_path_intents` | `path_intents.json` | `get_path_intents` on each root→node path, then `get_top_paths` keeps up to **3** best paths per node |
+| **4** | `save_user_intents` | `user_intents.json` | `get_node_user_intents` — **text-only** natural-language intents for the current screen |
+| **5** | `save_navigation_plans` | `node_navigation_plans.json` | `get_navigation_plan` — waypoint sequences + transition hints for top paths |
+| **6** | `add_node_embeddings_to_user_intents` | `user_intents.json` (in place) | **BGE-M3** locally — one dense vector per node for retrieval |
 
-### Stage 1 — User intents (`save_node_intents`)
-
-For each graph node, Stage 1 calls `get_node_user_intents` on the **primary path** (root→node with the fewest actions):
-
-| Call | Method | Input | Output |
-|------|--------|-------|--------|
-| **User intents** (multimodal) | `get_node_user_intents` | **Primary** visual path + outgoing edge descriptions | `user_intents`, `enhanced_page_summary` |
-
-**Multiple roots:** `build_paths_for_node` computes the shortest path from **every** `is_root: true` node. Unreachable root→node pairs are skipped (`NetworkXNoPath`). User intents use only the **primary path** (fewest actions).
-
-### Stage 2 — Navigation plans (`save_node_navigation_plans`)
-
-For each node, up to **3 shortest root paths** are kept. One text-only VLM call per root path:
-
-| Call | Method | Input | Output |
-|------|--------|-------|--------|
-| **Navigation plans** (text-only) | `get_node_navigation_plans` | `enhanced_page_summaries` + `actions` for one root | clustered plan with `root_ids`, `relevant_waypoint_sequence`, `transition_hints` |
-
-Plans from all roots are merged via `normalize_clustered_navigation_plans` (at most 3 plans per node). Written to **`node_navigation_plans.json`**.
+Uses `configs.post_process.use_yibu_api` to choose `VLM_Yibu` vs `VLM` (independent from `vlm.use_yibu_api` during exploration).
 
 ### Pipeline flow
 
@@ -315,197 +300,135 @@ flowchart TB
     G[graph.json]
     S[screenshots per node]
   end
-  subgraph stage1["Stage 1 — user intents (VLM)"]
-    P[build_paths_for_node — one path per reachable root]
-    PR[Pick primary path: fewest actions]
-    UI[get_node_user_intents — multimodal, primary path]
+  subgraph vlm["VLM stages"]
+    NL[get_node_level_information]
+    TE[get_transition_info]
+    PI[get_path_intents + get_top_paths]
+    UI[get_node_user_intents]
+    NP[get_navigation_plan]
   end
-  subgraph stage2["Stage 2 — navigation plans (VLM)"]
-    NP[get_node_navigation_plans — text only, per root up to 3]
+  subgraph embed["Retrieval index"]
+    BGE[BGE-M3 encode PAGE_DESCRIPTION + USER_INTENTS]
   end
-  subgraph stage3["Stage 3 — retrieval embeddings (BGE-M3)"]
-    ET[Build embedding_text: page_purpose + tabs + user_intents]
-    EMB[BGEM3FlagModel.encode — one vector per node]
+  subgraph out["Outputs"]
+    J1[node_level_information.json]
+    J2[edge_level_information.json]
+    J3[path_intents.json]
+    J4[user_intents.json]
+    J5[node_navigation_plans.json]
   end
-  subgraph out["Output"]
-    J[node_intents.json]
-    N[node_navigation_plans.json]
-  end
-  G --> P
-  S --> P
-  P --> PR --> UI
-  P --> NP
-  UI --> J
-  NP --> N
-  G --> ET
-  UI --> ET
-  ET --> EMB --> J
+  G --> NL
+  S --> NL
+  NL --> J1
+  J1 --> TE
+  S --> TE
+  TE --> J2
+  J1 --> PI
+  J2 --> PI
+  G --> PI
+  PI --> J3
+  J1 --> UI
+  J3 --> UI
+  G --> UI
+  UI --> J4
+  J1 --> NP
+  J2 --> NP
+  J3 --> NP
+  NP --> J5
+  J1 --> BGE
+  J4 --> BGE
+  BGE --> J4
 ```
 
-**Step 1 — Collect paths.** For every node, find all **root** nodes (`is_root: true`). For each root, compute the shortest node path `root → … → node` when reachable.
+### Stage details
 
-**Step 2 — Build path payload.** For each hop:
+**Stage 1 — Node-level information (`save_node_level_information`)**
 
-- Load `screenshots/{node_id}.jpg` from `logs.root`.
-- On each **source** screenshot, overlay **all parallel edges** (`visualize_edge_on_screenshot`).
-- Attach **enhanced page summaries** (`resolve_enhanced_page_summary` from Stage 1 output or graph fallback) and **action descriptions** (`simplify_edge_actions`).
+- One multimodal VLM call per graph node.
+- Input: node screenshot + weak `page_summary` from `graph.json`.
+- Output per node: `high_level`, `medium_level`, `low_level` page description (active overlay/modal aware).
 
-**Step 3 — Outgoing edges (intents only).** Collect outgoing edge descriptions from the target node. Scroll/swipe edges are deprioritized when other outgoing edges exist.
+**Stage 2 — Edge-level information (`save_edge_level_information`)**
 
-**Step 4 — User intents (one multimodal call per node).** Call `get_node_user_intents(primary_path, out_edges)` on the shortest path. Returns ranked **`user_intents`** and **`enhanced_page_summary`** for the final active surface.
+- One VLM call per directed edge `(source → target)` (parallel edges grouped).
+- Input: source/target page descriptions, edge descriptions, normalized bounding boxes, optional action crops.
+- Output: `transition_info` list with `low_level_action_description` and `high_level_action_description` per action cluster.
 
-**Step 5 — Navigation plans (one text-only call per root, up to 3).** For each kept root path, call `get_node_navigation_plans({root_id: bundle})`. Input is **only** `enhanced_page_summaries` and `actions` — **no screenshots**. Results are normalized into at most **3 clustered plans** with `root_ids` lists.
+**Stage 3 — Path intents (`save_path_intents`)**
 
-### Path building, parallel edges, and summary vs navigation-plan logic
+- For each node, enumerate shortest paths from every `is_root: true` node.
+- Build an alternating trajectory: `[page, actions, page, actions, …, page]`.
+- Score each path with `get_path_intents` → `path_user_goals` + `path_reliability`.
+- Keep the top **3** path ids via `get_top_paths`.
 
-Exploration stores the graph as a NetworkX **`MultiDiGraph`**: multiple directed edges may exist between the same pair of nodes (e.g. different taps from screen A to screen B discovered on separate walks). Post-processing turns those edges into path bundles in `build_paths_for_node`, then **Stage 1** and **Stage 2** use different subsets of that data.
+**Stage 4 — User intents (`save_user_intents`)**
 
-#### How a root→node path is chosen
+- **Text-only** VLM call per node (`get_node_user_intents`).
+- Inputs: node page description (`node_level_information`), ranked path goals (`path_intents`), outgoing edge descriptions (scroll/swipe excluded when other edges exist).
+- Output: natural-language **`user_intents`** list (destination-style commands, not short labels).
 
-For target node **T**, `build_paths_for_node`:
+**Stage 5 — Navigation plans (`save_navigation_plans`)**
 
-1. Collects every node with `is_root: true`.
-2. For each root **R**, runs `nx.shortest_path(G, R, T)` on the **unweighted** directed graph.
-3. Skips roots with no directed path (`NetworkXNoPath` / `NodeNotFound`) — common when the graph has disconnected entry subtrees from separate walks.
-4. Builds one **path bundle** per reachable root:
+- **Text-only** VLM call per node (`get_navigation_plan`).
+- Input bundles target page description + top paths (pages + transition actions from Stages 1–2).
+- Output: **`node_navigation_plans.json`** maps each `node_id` to a **list** of plans:
 
-| Bundle field | Contents |
-|--------------|----------|
-| `screenshots` | `screenshots/{node_id}.jpg` per node on the path; hop source frames are annotated (see below) |
-| `enhanced_page_summaries` | One summary dict per node on the path (see below) |
-| `actions` | One entry per hop `path[i] → path[i+1]` (see parallel edges below) |
-
-**Route selection** uses **fewest hops** (shortest node list). `nx.shortest_path` returns a **node sequence only** — it does not pick which parallel edge was taken on a hop. Tie-breaking between equal-length routes follows NetworkX BFS order on the fixed graph.
-
-**Primary path** (Stage 1 user intents): among all reachable root bundles, pick the one with the **smallest `len(actions)`** (fewest hops). Ties keep whichever bundle `min(...)` returns first.
-
-**Navigation-plan paths** (Stage 2): sort all reachable root bundles by `len(actions)` ascending and keep the **3 shortest** (may be fewer if there are fewer roots or reachable paths).
-
-#### Parallel edges on each hop
-
-When the path goes `u → v`, `nx_graph.get_edge_data(u, v)` returns **all** parallel edges as `{0: attrs, 1: attrs, ...}`.
-
-Post-processing does **not** disambiguate to a single edge. Both code paths keep **every** parallel edge for that hop:
-
-| Function | Behavior |
-|----------|----------|
-| `simplify_edge_actions` | Appends **all** parallel edges as a list of `{edge_key, type, description}` — one list item per hop in `actions` |
-| `visualize_edge_on_screenshot` | Draws **all** parallel edges on the source screenshot (color-coded; labels `[1]`, `[2]`, … when multiple) |
-
-So if exploration recorded three different taps from A→B, Stage 1 screenshots show all three overlays and both `actions` and the nav-plan VLM see all three descriptions for that hop. This is intentional: post-process documents **every known way** to traverse that hop, not one specific walk replay.
-
-**Contrast with runtime backtrack** (`BackTrack.get_shortest_path_from_root_node`): inference backtrack takes only the **first** parallel edge per hop. Post-process is more inclusive for memory generation.
-
-#### `enhanced_page_summaries` along a path
-
-For each node `N` on a path, `resolve_enhanced_page_summary(N, node_intents, nx_graph)` returns:
-
-1. **Stage 2 (navigation plans):** if `node_intents[N].enhanced_page_summary` exists from Stage 1, use that structured dict (`tag`, `page_purpose`, `active_tab`, `visual_landmarks`, …).
-2. **Otherwise (Stage 1 path build, or nodes not yet processed):** fall back to graph metadata — `page_summary`, `page_purpose`, `active_tab`, `active_subtab` from `graph.json`.
-
-**Stage 1** calls `build_paths_for_node(..., node_intents={})`, so every node on the primary path uses the **graph fallback** when building the multimodal payload. The VLM then produces the definitive **`enhanced_page_summary` for the target node only** (final screen on the primary path) via `get_node_user_intents`.
-
-**Stage 2** rebuilds paths with the completed `node_intents.json`, so waypoints along each root path prefer **Stage 1 enhanced summaries** where available (richer tab/landmark text for nodes already processed). Nodes not in `node_intents` still use the graph fallback.
-
-#### What each stage consumes
-
-```mermaid
-flowchart LR
-  subgraph build["build_paths_for_node(T)"]
-    R[All is_root nodes]
-    SP[shortest_path per reachable root]
-    PE[All parallel edges per hop]
-    R --> SP --> PE
-  end
-
-  subgraph s1["Stage 1 — save_node_intents"]
-    PP[Primary path: min hops]
-  end
-
-  subgraph s2["Stage 2 — save_node_navigation_plans"]
-    TOP3[Up to 3 shortest root paths]
-  end
-
-  PE --> PP
-  PE --> TOP3
-  PP -->|screenshots + graph fallbacks| UI[get_node_user_intents]
-  UI --> EPS[enhanced_page_summary for T]
-  TOP3 -->|enhanced_page_summaries + actions text only| NP[get_node_navigation_plans per root]
-  EPS --> TOP3
+```json
+{
+  "node_id": [
+    {
+      "relevant_waypoint_sequence": ["...", "..."],
+      "transition_hints": ["Tap the filter chip near the top of the screen."]
+    }
+  ]
+}
 ```
 
-| | **Stage 1 — user intents + enhanced summary** | **Stage 2 — ui_navigation_memory** |
-|---|--------------------------------------------------|--------------------------------------|
-| **Paths used** | One **primary** path (fewest hops across all roots) | Up to **3 shortest** root paths |
-| **Screenshots** | Yes — annotated with all parallel edges per hop | No — text only |
-| **`enhanced_page_summaries`** | Graph fallback along path; VLM outputs summary for **target node** | Stage 1 summaries on path where available, else graph fallback |
-| **`actions`** | Sent to multimodal intent call (with screenshots) | Sent to text-only nav-plan call (all parallel edges per hop) |
-| **Outgoing edges** | Target node out-edges (scroll/swipe deprioritized) passed as negative context | Not used |
-| **Output** | `user_intents`, `enhanced_page_summary` → `node_intents.json` | Clustered `ui_navigation_memory` → `node_navigation_plans.json` |
+**Stage 6 — Retrieval embeddings (`add_node_embeddings_to_user_intents`)**
 
-After all per-root VLM calls for a node, `normalize_clustered_navigation_plans` merges results into at most **3** plans, each with a `root_ids` list, `relevant_waypoint_sequence`, and `transition_hints`.
+- Loads `node_level_information.json` + `user_intents.json`.
+- Builds `embedding_text` from page description + `user_intents`.
+- Encodes with **BGE-M3**, L2-normalizes, writes `embedding` + `embedding_text` back into **`user_intents.json`**.
+- Navigation plans are **not** embedded — only node-level text is used for stage-1 retrieval in inference.
 
-### Stage 3 — Node embeddings for retrieval (BGE-M3)
+### Output schema (inference-facing)
 
-After Stages 1–2, Stage 3 enriches `node_intents.json` in place:
-
-1. Load `graph.json` and `node_intents.json`.
-2. For each node, build **`embedding_text`** from graph metadata plus Stage 1 intents:
-   - `page_purpose`, `active_tab`, `active_subtab` from `graph.json`
-   - `user_intents` from Stage 1
-3. Encode all nodes with **`BAAI/bge-m3`** (`FlagEmbedding.BGEM3FlagModel`), batched and L2-normalized for cosine similarity.
-4. Write back to `node_intents.json` with `embedding_text` and a single **`embedding`** vector per node.
-
-Navigation memory is **not** embedded — only the node-level intent text is used for retrieval.
-
-### Output schema
-
-**`node_intents.json`**
+**`user_intents.json`** (Stages 4 + 6)
 
 ```json
 {
   "node_id": {
     "user_intents": [
-      "Go to the page to manage configured alarms.",
-      "Navigate to the page to enable or disable an existing alarm."
+      "Navigate to the page where I can see my order history."
     ],
-    "enhanced_page_summary": {
-      "tag": "...",
-      "page_purpose": "...",
-      "active_tab": "...",
-      "active_subtab": "...",
-      "visual_landmarks": [],
-      "salient_controls": []
-    },
-    "embedding_text": "PAGE_PURPOSE:\n...\n\nACTIVE_TAB:\n...\n\nUSER_INTENTS:\n[...]",
-    "embedding": [0.01, 0.02, ...]
+    "embedding_text": "PAGE_DESCRIPTION:\n...\n\nUSER_INTENTS:\n[...]",
+    "embedding": [0.01, 0.02]
   }
 }
 ```
 
-**`node_navigation_plans.json`** (Stage 2)
+**`node_level_information.json`** (Stage 1)
 
 ```json
 {
   "node_id": {
-    "ui_navigation_memory": [
-      {
-        "root_ids": ["..."],
-        "relevant_waypoint_sequence": ["..."],
-        "transition_hints": ["..."]
-      }
-    ]
+    "high_level": "Order history and account activity.",
+    "medium_level": "...",
+    "low_level": "..."
   }
 }
 ```
 
+**`node_navigation_plans.json`** (Stage 5) — see example above. Each value is a **list of plan objects**, not a nested `ui_navigation_memory` wrapper.
+
 | Field | Stage | Notes |
 |-------|-------|-------|
-| `user_intents` | 1 | One ranked list per node; from **primary path** only; deduplicated |
-| `enhanced_page_summary` | 1 | Structured summary of the final screen on the primary path |
-| `ui_navigation_memory` | 2 | In **`node_navigation_plans.json` only** — up to **3 clustered plans** per node |
-| `embedding_text` | 3 | Concatenated graph metadata + `user_intents` used as the embedder input |
-| `embedding` | 3 | One dense vector per **node** (not per intent string) for retrieval |
+| `high_level` / `medium_level` / `low_level` | 1 | Per-node page description; used in reranking and nav-plan input |
+| `transition_info` | 2 | Per edge key `source|target` |
+| `path_user_goals`, `path_reliability` | 3 | Up to 3 paths per node in `path_intents.json` |
+| `user_intents` | 4 | Natural-language navigation commands for the target screen |
+| plan list | 5 | `relevant_waypoint_sequence` + `transition_hints` per path |
+| `embedding_text`, `embedding` | 6 | One vector per node for cosine retrieval |
 
 ### Run via `run_post_process.sh`
 
@@ -516,45 +439,54 @@ Navigation memory is **not** embedded — only the node-level intent text is use
 | Env | `CONFIG=configs/your_app.yaml` (required) |
 | Log | `{logs.root}/post_process.log` |
 
-Uses `configs.post_process.use_yibu_api` to choose `VLM_Yibu` vs `VLM` (independent from `vlm.use_yibu_api` during exploration).
-
 ### Post-processing config (`post_process` in YAML)
 
-Example (`configs/clock_android.yaml`):
+Example (`configs/alibaba_harmony.yaml`):
 
 ```yaml
 post_process:
-  vlm_model_name_for_node_intents: 'qwen3.6-plus'
-  vlm_model_name_for_node_navigation_plans: 'qwen3.5-flash'
+  vlm_model_name_for_node_level_information: 'qwen3.6-plus'
+  vlm_model_image_size_for_node_level_information: 1024
+  vlm_model_image_quality_for_node_level_information: 90
+
+  vlm_model_name_for_transition_info: 'qwen3.5-flash'
+  vlm_model_action_crop_size: 280
+  vlm_model_image_quality_for_transition_info: 90
+
+  vlm_model_name_for_path_intents: 'qwen3.6-plus'
+  vlm_model_name_for_node_user_intents: 'qwen3.6-plus'
+  vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
+
   use_yibu_api: true
-  max_workers: 8
-  vlm_processing_img_size_for_last_screenshot: 1536
-  vlm_processing_img_quality_for_last_screenshot: 90
-  vlm_processing_img_size_for_other_screenshots: 1024
-  vlm_processing_img_quality_for_other_screenshots: 88
 ```
 
 | Key | Used by | Description |
 |-----|---------|-------------|
-| `use_yibu_api` | `post_process.py` | `true` → `VLM_Yibu`; `false` → `VLM` (DashScope) for both post-process VLM methods |
-| `vlm_model_name_for_node_intents` | `get_node_user_intents` | Model id for multimodal intent extraction |
-| `vlm_model_name_for_node_navigation_plans` | `get_node_navigation_plans` | Model id for text-only navigation plans |
-| `max_workers` | `save_node_intents`, `save_node_navigation_plans` | Thread pool size for per-node VLM calls |
-| `vlm_processing_img_size_for_last_screenshot` | `get_node_user_intents` only | Longest side (px) for the **final** screenshot on the path |
-| `vlm_processing_img_quality_for_last_screenshot` | same | JPEG quality for the final screenshot |
-| `vlm_processing_img_size_for_other_screenshots` | same | Longest side for earlier route-context screenshots |
-| `vlm_processing_img_quality_for_other_screenshots` | same | JPEG quality for non-final screenshots |
+| `use_yibu_api` | `post_process.py` | `true` → `VLM_Yibu`; `false` → `VLM` (DashScope) |
+| `vlm_model_name_for_node_level_information` | Stage 1 | Multimodal page description model |
+| `vlm_model_image_size_for_node_level_information` | Stage 1 | Longest side (px) for node screenshots |
+| `vlm_model_image_quality_for_node_level_information` | Stage 1 | JPEG quality for node screenshots |
+| `vlm_model_name_for_transition_info` | Stage 2 | Edge/action description model |
+| `vlm_model_action_crop_size` | Stage 2 | Longest side for action crop images |
+| `vlm_model_image_quality_for_transition_info` | Stage 2 | JPEG quality for action crops |
+| `vlm_model_name_for_path_intents` | Stage 3 | Path scoring + `get_top_paths` rerank |
+| `vlm_model_name_for_node_user_intents` | Stage 4 | Text-only user intent generation |
+| `vlm_model_name_for_navigation_plan` | Stage 5 | Text-only navigation plan generation |
+| `max_workers` | Stages 1–5 | Thread pool size for parallel node/edge jobs |
 
-Image size/quality keys apply **only** to `get_node_user_intents`. `get_node_navigation_plans` is text-only and ignores them.
+Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use the post-process VLM.
 
-**API keys:** `vlm.alibaba_api_key` for DashScope; `vlm.yibu_api_key` when `post_process.use_yibu_api: true`. Stage 3 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use the post-process VLM or `ImageUtils` text embedder.
+**API keys:** `vlm.alibaba_api_key` for DashScope; `vlm.yibu_api_key` when `post_process.use_yibu_api: true`.
 
 ### Outputs (post-processing)
 
 | File | Contents |
 |------|----------|
-| `node_intents.json` | Per-node `user_intents`, `enhanced_page_summary`, `embedding_text`, `embedding` |
-| `node_navigation_plans.json` | Per-node clustered `ui_navigation_memory` |
+| `node_level_information.json` | Per-node `high_level` / `medium_level` / `low_level` descriptions |
+| `edge_level_information.json` | Per-edge `transition_info` action clusters |
+| `path_intents.json` | Top paths per node with goals and reliability scores |
+| `user_intents.json` | Per-node `user_intents`, plus `embedding_text` + `embedding` after Stage 6 |
+| `node_navigation_plans.json` | Per-node **list** of navigation plans |
 | `post_process.log` | Console log when using `run_post_process.sh` |
 
 ### Preparing an app for inference (checklist)
@@ -562,8 +494,8 @@ Image size/quality keys apply **only** to `get_node_user_intents`. `get_node_nav
 1. **Device + config** — create YAML with `driver`, `agent`, `vlm`, `graph`, `logs`, `post_process`; set **`use_launcher_intent: true`** when needed; run [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy).
 2. **Explore** — `CONFIG=configs/your_app.yaml ./run_explore.sh` until the graph is large enough.
 3. **Confirm artifacts** — under `logs.root`: `graph.json`, `screenshots/*.jpg`, `app_graph.pkl`.
-4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → `node_intents.json` + `node_navigation_plans.json` (Stages 1–3).
-5. **Downstream inference** — match queries against `embedding` / `user_intents` in `node_intents.json`; replay routes using `ui_navigation_memory` from `node_navigation_plans.json`.
+4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → full artifact set above.
+5. **Downstream inference** — cosine-search `embedding` in `user_intents.json`, VLM-rerank with page descriptions, replay routes from `node_navigation_plans.json`.
 
 ---
 
@@ -665,7 +597,7 @@ Graph/
 explore.py                  # CLI entry: --config, exploration loop, logs_num_walks_nodes, plot_nodes_vs_walk → num_nodes_vs_walk.png
 check_driver.py             # interactive driver preflight: launch, reset_to_start_page, foreground loop
 run_explore.sh              # optional wrapper: tee console log to logs.root/explore.log
-post_process.py             # CLI: Stage 1 intents, Stage 2 nav plans, Stage 3 BGE-M3 embeddings → node_intents.json
+post_process.py             # CLI: 6 VLM stages + BGE-M3 embeddings → user_intents.json, node_navigation_plans.json, …
 run_post_process.sh         # wrapper: tee console log to logs.root/post_process.log
 VLM.py                      # DashScope multimodal + embeddings
 VLM_Yibu.py                 # Yibu multimodal (OpenAI-compatible); embeddings still DashScope
@@ -1375,8 +1307,8 @@ Outputs under `logs.root` (e.g. `explored_apps/clock/`):
 | `debug_paths/debug_path_screenshot_history_{N}_llm_based_bfs_{step}.jpg` | Per successful BFS branch in `llm_based_bfs` (shortest-path node screenshots + branch landing) |
 | `num_nodes_vs_walk.png` | Exploration progress chart (updated after each walk); see [Exploration progress plot](#exploration-progress-plot) |
 | `interactive_node_graph.html` | Visual graph explorer |
-| `node_intents.json` | Post-processing: `user_intents`, `enhanced_page_summary`, `embedding_text`, `embedding` |
-| `node_navigation_plans.json` | Post-processing Stage 2: per-node clustered `ui_navigation_memory` |
+| `user_intents.json` | Post-processing Stages 4+6: `user_intents`, `embedding_text`, `embedding` |
+| `node_navigation_plans.json` | Post-processing Stage 5: per-node list of navigation plans |
 | `post_process.log` | Console stdout/stderr when using `run_post_process.sh` |
 
 ### Exploration progress plot
@@ -2050,7 +1982,7 @@ If the agent keeps conversation state:
 | `explore.py` | CLI (`--config`), `VLM` vs `VLM_Yibu` from `vlm.use_yibu_api`, schedule depth, mode selection, `load_or_create_app_graph`, resume, per-walk export, `plot_nodes_vs_walk` / `num_nodes_vs_walk.png` |
 | `check_driver.py` | Interactive driver preflight (`--config`): `run_application`, `reset_to_start_page`, foreground loop — run before `explore.py`; verify `use_launcher_intent` when `am start -n` fails — see [Driver preflight](#driver-preflight-check_driverpy) |
 | `run_explore.sh` | Run `explore.py` with `CONFIG=...`; tee log to `{logs.root}/explore.log` — see [How to run](#how-to-run) |
-| `post_process.py` | Stage 1: `save_node_intents` (VLM user intents + enhanced summaries); Stage 2: `save_node_navigation_plans` (clustered nav memory); Stage 3: BGE-M3 embeddings → `node_intents.json` |
+| `post_process.py` | Stages 1–5: node/edge/path/user intents + navigation plans; Stage 6: BGE-M3 → `user_intents.json` |
 | `run_post_process.sh` | Run `post_process.py` with `CONFIG=...`; tee log to `{logs.root}/post_process.log` — see [Post-processing](#post-processing-post_processpy) |
 | `Graph/AppGraph.py` | NetworkX graph, `add_node` / `add_edge`, JSON + pickle export; `logs_num_walks_nodes` for progress plot |
 | `Graph/Node.py` | Screen node creation, VLM elements, `refresh_elements`, `backtracking_action` |

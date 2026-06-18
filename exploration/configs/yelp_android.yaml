@@ -99,10 +99,16 @@ default:
     resume_from_checkpoint: true
 
   post_process:
-    vlm_model_name_for_node_intents: 'qwen3.6-plus'
-    vlm_model_name_for_node_navigation_plans: 'qwen3.5-flash'
+    vlm_model_name_for_node_level_information: 'qwen3.6-plus'
+    vlm_model_image_size_for_node_level_information: 1024
+    vlm_model_image_quality_for_node_level_information: 90
+
+    vlm_model_name_for_transition_info: 'qwen3.5-flash'
+    vlm_model_action_crop_size: 280
+    vlm_model_image_quality_for_transition_info: 90
+
+    vlm_model_name_for_path_intents: 'qwen3.6-plus'
+    vlm_model_name_for_node_user_intents: 'qwen3.6-plus'
+    vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
+
     use_yibu_api: true
-    vlm_processing_img_size_for_last_screenshot: 1536
-    vlm_processing_img_quality_for_last_screenshot: 90
-    vlm_processing_img_size_for_other_screenshots: 1024
-    vlm_processing_img_quality_for_other_screenshots: 88

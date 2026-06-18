@@ -110,29 +110,6 @@ class VLM:
         self.debugger = debugger
         self.configs = configs
 
-    def _post_process_model_for_node_intents(self) -> str:
-        post_process = self.configs.post_process
-        model = (
-            getattr(post_process, "vlm_model_name_for_node_intents", None)
-            or getattr(post_process, "vlm_model_name", None)
-        )
-        if not model:
-            raise ValueError(
-                "post_process.vlm_model_name_for_node_intents or post_process.vlm_model_name must be set"
-            )
-        return str(model).strip()
-
-    def _post_process_model_for_node_navigation_plans(self) -> str:
-        post_process = self.configs.post_process
-        model = (
-            getattr(post_process, "vlm_model_name_for_node_navigation_plans", None)
-            or getattr(post_process, "vlm_model_name", None)
-        )
-        if not model:
-            raise ValueError(
-                "post_process.vlm_model_name_for_node_navigation_plans or post_process.vlm_model_name must be set"
-            )
-        return str(model).strip()
 
     def extract_elements_from_page(self, screenshot, application_description="", action_history=None):
         """
@@ -1234,280 +1211,70 @@ class VLM:
 
         return result
 
-    def get_node_level_information(self, screenshot, page_summary, out_edges):
+
+
+    def get_node_level_information(self, screenshot, page_summary):
         """
-        Generate node-level observation information for one UI graph node.
+        Compact node-level page description.
 
-        This is Pass 1 only:
-        - describes the current node's topmost active UI surface
-        - produces a local enhanced summary
-        - lists visible content, layout regions, salient controls
-        - maps outgoing action descriptions to outgoing affordances
+        Input:
+            screenshot: current UI screenshot
+            page_summary: weak page summary string
 
-        It does NOT generate final user intents.
-        It does NOT generate navigation plans.
-        It does NOT decide whether the node is globally stable/noisy/transient.
-
-        Args:
-            screenshot:
-                Screenshot image/path/object accepted by resize_and_encode_to_base64.
-            page_summary:
-                Weak page summary from the weak VLM or earlier pipeline.
-            out_edges:
-                List of outgoing action descriptions for this node.
-                Can be strings, dicts with "description", or graph edge tuples.
-
-        Returns:
+        Output:
             {
-                "node_observation": {
-                    ...
+                "page_description": {
+                    "high_level": "...",
+                    "medium_level": "...",
+                    "low_level": "..."
                 }
             }
         """
-        import json
-        import dashscope
 
-        def clean_outgoing_actions(out_edges):
-            """
-            Normalize outgoing edges/actions into a list of action-description strings.
-            Supports:
-            - ["Tap Settings", "Scroll down"]
-            - [{"description": "...", "type": "..."}]
-            - networkx edge tuples: (u, v, attrs) or (u, v, key, attrs)
-            """
-            descriptions = []
-
-            if not out_edges:
-                return descriptions
-
-            for edge in out_edges:
-                desc = ""
-
-                if isinstance(edge, str):
-                    desc = edge.strip()
-
-                elif isinstance(edge, dict):
-                    desc = (
-                        edge.get("description")
-                        or edge.get("action_description")
-                        or edge.get("label")
-                        or ""
-                    ).strip()
-
-                    action_type = edge.get("type", "")
-                    if action_type and desc:
-                        desc = f"{action_type}: {desc}"
-
-                elif isinstance(edge, (tuple, list)):
-                    attrs = None
-
-                    if len(edge) == 3:
-                        attrs = edge[2]
-                    elif len(edge) == 4:
-                        attrs = edge[3]
-
-                    if isinstance(attrs, dict):
-                        desc = (
-                            attrs.get("description")
-                            or attrs.get("action_description")
-                            or attrs.get("label")
-                            or ""
-                        ).strip()
-
-                        action_type = attrs.get("type", "")
-                        if action_type and desc:
-                            desc = f"{action_type}: {desc}"
-
-                if desc:
-                    descriptions.append(desc)
-
-            # preserve order, remove duplicates
-            return list(dict.fromkeys(descriptions))
-
-        def normalize_page_summary(page_summary):
-            if page_summary is None:
-                return ""
-
-            if isinstance(page_summary, str):
-                return page_summary.strip()
-
-            try:
-                return json.dumps(page_summary, ensure_ascii=False, indent=2)
-            except Exception:
-                return str(page_summary)
-
-        def extract_response_text(response):
-            content = response.output.choices[0].message.content
-
-            if isinstance(content, list):
-                text = "".join(
-                    item.get("text", "")
-                    for item in content
-                    if isinstance(item, dict)
-                )
-            else:
-                text = content
-
-            text = text.strip()
-
-            if text.startswith("```json"):
-                text = text.removeprefix("```json").removesuffix("```").strip()
-            elif text.startswith("```"):
-                text = text.removeprefix("```").removesuffix("```").strip()
-
-            return text
-
-        def ensure_schema(output):
-            """
-            Light schema repair so downstream code does not crash if the model omits
-            a non-critical field.
-            """
-            if not isinstance(output, dict):
-                output = {}
-
-            node_observation = output.setdefault("node_observation", {})
-
-            node_observation.setdefault("active_surface", {})
-            node_observation["active_surface"].setdefault("surface_kind", "unknown")
-            node_observation["active_surface"].setdefault("is_overlay_active", False)
-            node_observation["active_surface"].setdefault("underlying_page_role", "unclear")
-            node_observation["active_surface"].setdefault("active_surface_evidence", [])
-
-            node_observation.setdefault("local_enhanced_summary", {})
-            node_observation["local_enhanced_summary"].setdefault("tag", "unknown")
-            node_observation["local_enhanced_summary"].setdefault("visible_surface_summary", "")
-            node_observation["local_enhanced_summary"].setdefault("local_page_purpose", "")
-            node_observation["local_enhanced_summary"].setdefault("screen_type", "unknown")
-            node_observation["local_enhanced_summary"].setdefault("active_tab", None)
-            node_observation["local_enhanced_summary"].setdefault("active_subtab", None)
-            node_observation["local_enhanced_summary"].setdefault("selected_navigation", None)
-
-            node_observation.setdefault("visible_content", [])
-
-            node_observation.setdefault("layout_regions", {})
-            node_observation["layout_regions"].setdefault("top_bar", "")
-            node_observation["layout_regions"].setdefault("main_area", "")
-            node_observation["layout_regions"].setdefault("bottom_nav", "")
-            node_observation["layout_regions"].setdefault("overlay", "")
-
-            node_observation.setdefault("local_ambiguity", [])
-            node_observation.setdefault("observation_confidence", 0.0)
-
-            return output
-
-        cleaned_out_edges = clean_outgoing_actions(out_edges)
-        weak_summary_text = normalize_page_summary(page_summary)
         system_prompt = """
-        You are a mobile UI node-observation module.
+    You describe mobile UI screenshots compactly.
 
-        You are given one screenshot of a mobile app node, a weak page summary, and outgoing action descriptions collected during exploration.
+    Given a screenshot and a weak page summary, describe only the visible ACTIVE UI surface.
 
-        Your task is to describe the CURRENT NODE's topmost active UI surface using local visual evidence from this node.
+    If a modal, dialog, popup, bottom sheet, dropdown, picker, menu, search overlay, permission prompt, or focused panel is open, treat it as the active page surface.
 
-        If a modal, dialog, bottom sheet, popup menu, dropdown, picker, drawer, permission prompt, search overlay, or focused panel is open, describe that active surface. Treat the underlying page as background only.
+    When an overlay/modal is active:
+    - Describe only the overlay/modal as the active surface.
+    - Do not describe inactive/background page details.
+    - You may mention only that the background is dimmed/inactive if visually necessary.
 
-        Outgoing actions are graph evidence from exploration. Use them only to help associate visible controls with known actions from this node. Do not infer the destination page's purpose as the current node's purpose.
+    If no overlay/modal is active, describe the main page normally.
 
-        For visible content and controls, assign only a neutral visual_container describing where the element appears visually. Do not decide whether an element is useful, stable, noisy, task-relevant, or should be avoided. Those judgments require trajectory and user-goal context and will be made later.
+    Return only three description levels:
+    - high_level: what this page/surface is mainly for.
+    - medium_level: the main regions, sections, and visible page state.
+    - low_level: stable visible labels/text/content that identify the page.
 
-        For list-like pages, settings pages, menus, forms, and tab pages:
-        - Preserve every visible interactive row, button, tab, switch, checkbox, radio option, field, menu item, or settings item that appears on the active surface.
-        - Do not merge distinct visible interactive rows into one summary.
-        - Keep their visible order from top to bottom when possible.
+    Do not list individual UI elements exhaustively.
+    Do not describe bounding boxes, coordinates, ids, or element indexes.
+    Do not infer navigation goals.
+    Do not describe outgoing edges.
+    Do not include confidence, ambiguity, stability, usefulness, or task relevance.
+    Return JSON only. Do not add extra fields.
+    """.strip()
 
-        For content-heavy feed/card pages:
-        - Preserve visible interactive controls and major visible content cards.
-        - Do not extract every tiny word inside large images or long content blocks unless it is prominent or needed to describe the visible surface.
-
-        Return JSON only using the requested schema. Do not add extra fields.
-        """.strip()
         user_prompt = f"""
-        Weak page summary:
-        {weak_summary_text}
+    Weak page summary:
+    {page_summary}
 
-        Outgoing actions from this node, provided as graph evidence:
-        {json.dumps(cleaned_out_edges, ensure_ascii=False, indent=2)}
+    Return exactly this JSON schema:
 
-        Analyze the screenshot and return JSON with exactly this schema:
+    {{
+    "page_description": {{
+        "high_level": "one sentence describing what the active page/surface is for",
+        "medium_level": "one compact paragraph describing main regions, sections, layout, and state",
+        "low_level": "one or two compact paragraphs of complete listing of stable visible labels/text/content that identify this page"
+    }}
+    }}
+    """.strip()
 
-        {{
-        "node_observation": {{
-            "active_surface": {{
-            "surface_kind": "main_page | tab | list | settings_list | menu | form | detail_page | dialog | modal | bottom_sheet | popup_menu | dropdown | picker | search_overlay | permission_prompt | focused_panel | unknown",
-            "is_overlay_active": true,
-            "underlying_page_role": "background_only | not_applicable | unclear",
-            "active_surface_evidence": [
-                "short visual evidence for why this is the active surface"
-            ]
-            }},
-            "local_enhanced_summary": {{
-            "tag": "short noun phrase, max 5 words",
-            "visible_surface_summary": "what is visibly present on the active surface",
-            "local_page_purpose": "what this surface locally appears to support, without route context",
-            "screen_type": "short label",
-            "active_tab": "string or null",
-            "active_subtab": "string or null",
-            "selected_navigation": "string or null"
-            }},
-            "visible_content": [
-            {{
-                "text_or_description": "important visible non-interactive text, object, section, card, or content group",
-                "region": "top_bar | main_area | bottom_nav | overlay | unknown",
-                "visual_container": "toolbar | tab_bar | page_header | section_header | list_content | content_card | feed_post_content | banner_or_prompt | form_content | modal_content | background_page | unknown"
-            }}
-            ],
-            "visible_interactive_elements": [
-            {{
-                "label": "visible label or inferred icon/control role",
-                "element_type": "button | tab | list_row | settings_row | switch | checkbox | radio_option | text_field | search_field | icon_button | menu_item | card | link | unknown",
-                "region": "top_bar | main_area | bottom_nav | overlay | unknown",
-                "visual_container": "toolbar | tab_bar | page_header | section_header | list_row | settings_row | content_card | feed_post_content | banner_or_prompt | form_field | modal_content | background_page | unknown",
-                "local_role": "what this element appears to do from the current active surface",
-                "visible_state": "selected | unselected | enabled | disabled | checked | unchecked | expanded | collapsed | unclear | not_applicable",
-                "order_index": 0,
-            }}
-            ],
-            "layout_regions": {{
-            "top_bar": "description or empty string",
-            "main_area": "description or empty string",
-            "bottom_nav": "description or empty string",
-            "overlay": "description or empty string"
-            }},
-            ],
-            "local_ambiguity": [
-            "what cannot be known from this node alone"
-            ],
-            "observation_confidence": 0.0
-        }}
-        }}
-
-        Guidelines:
-        - Focus on the topmost active UI surface.
-        - If an overlay is active, describe the overlay as the active surface and the underlying page only as background.
-        - Keep visual_container neutral. It describes where the element appears, not whether it is good or bad for navigation.
-        - Do not infer task relevance from visual_container.
-        - Preserve all visible interactive rows/controls on settings pages, menus, forms, tabs, and lists.
-        - Do not merge distinct settings rows, menu rows, tabs, form fields, or selectable list rows.
-        - Outgoing actions are known graph edges. Use them only to fill matched_outgoing_actions or unmatched_outgoing_actions.
-        - Do not describe outgoing destinations as the current node's purpose.
-        - Return valid JSON only.
-        """.strip()
-
-
-        # This is a single-node observation, so treat the screenshot like the final/current image.
-        is_final = True
-
-        max_side = (
-            self.configs.post_process.vlm_processing_img_size_for_last_screenshot
-            if is_final
-            else self.configs.post_process.vlm_processing_img_size_for_other_screenshots
-        )
-
-        quality = (
-            self.configs.post_process.vlm_processing_img_quality_for_last_screenshot
-            if is_final
-            else self.configs.post_process.vlm_processing_img_quality_for_other_screenshots
-        )
+        max_side = self.configs.post_process.vlm_model_image_size_for_node_level_information
+        quality = self.configs.post_process.vlm_model_image_quality_for_node_level_information
 
         _, _, data_uri = resize_and_encode_to_base64(
             screenshot,
@@ -1524,668 +1291,78 @@ class VLM:
                 "role": "user",
                 "content": [
                     {"text": user_prompt},
-                    {
-                        "text": (
-                            "Screenshot of the CURRENT NODE. "
-                            "Analyze the topmost active UI surface only."
-                        )
-                    },
                     {"image": data_uri},
                 ],
             },
         ]
 
-        # Prefer a dedicated model method if you add one; otherwise reuse your node-intent model.
-        if hasattr(self, "_post_process_model_for_node_level_information"):
-            model_name = self._post_process_model_for_node_level_information()
-        else:
-            model_name = self._post_process_model_for_node_intents()
-
-        response = dashscope.MultiModalConversation.call(
-            model=model_name,
-            messages=messages,
-            response_format={"type": "json_object"},
-            vl_high_resolution_images=True,
-            temperature=0.0,
-            seed=42,
-            top_p=0.9,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"VLM call failed: status_code={response.status_code} "
-                f"code={getattr(response, 'code', None)} "
-                f"message={getattr(response, 'message', None)}"
+        model_name = self.configs.post_process.vlm_model_name_for_node_level_information
+        max_attempts = int(getattr(self.configs.post_process, "request_retries", 5) or 5)
+        last_error = None
+        content = None
+        text = ""
+        for attempt in range(1, max_attempts + 1):
+            response = dashscope.MultiModalConversation.call(
+                model=model_name,
+                messages=messages,
+                response_format={"type": "json_object"},
+                vl_high_resolution_images=True,
+                temperature=0.0,
+                seed=42,
+                top_p=0.9,
             )
-
-        text = extract_response_text(response)
-
-        try:
-            output = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Failed to parse node-level VLM response as JSON.\n"
-                f"Raw response:\n{text}"
-            ) from exc
-
-        return ensure_schema(output)
-
-    def get_node_user_intents(self, path, out_edges):
-        """
-        Generate user_intents for the final active surface of one visual path.
-
-        Input:
-            path: {
-                "screenshots": [...],
-                "enhanced_page_summaries": [...],
-                "actions": [...]
-            }
-            out_edges: outgoing edges/descriptions from the final node
-
-        Output:
-            {
-                "user_intents": [...],
-                "enhanced_page_summary": {...}
-            }
-        """
-        import json
-        import dashscope
-
-        def clean_actions(actions):
-            cleaned_steps = []
-
-            for step_edges in actions:
-                cleaned_edges = []
-
-                if isinstance(step_edges, dict):
-                    edge_items = step_edges.values()
-                elif isinstance(step_edges, list):
-                    edge_items = step_edges
-                else:
-                    edge_items = []
-
-                for attrs in edge_items:
-                    if not isinstance(attrs, dict):
-                        continue
-
-                    cleaned_edges.append({
-                        "type": attrs.get("type", ""),
-                        "description": attrs.get("description", "")
-                    })
-
-                cleaned_steps.append(cleaned_edges)
-
-            return cleaned_steps
-
-        def clean_outgoing_edges(out_edges):
-            descriptions = []
-
-            for edge in out_edges:
-                if isinstance(edge, str):
-                    desc = edge.strip()
-                    if desc:
-                        descriptions.append(desc)
-                    continue
-
-                if len(edge) == 3:
-                    _, _, attrs = edge
-                elif len(edge) == 4:
-                    _, _, _, attrs = edge
-                else:
-                    continue
-
-                if not isinstance(attrs, dict):
-                    continue
-
-                desc = attrs.get("description", "")
-                if desc:
-                    descriptions.append(desc)
-
-            return list(dict.fromkeys(descriptions))
-
-        system_prompt = """
-    You are a precise mobile UI user-intent generator.
-
-    You are given one visual navigation path inside an already-open mobile app.
-
-    The FINAL screenshot is the main target.
-    Earlier screenshots are only route context.
-    Outgoing actions are only possible next actions from the final page.
-
-    Task:
-    Generate user_intents and enhanced_page_summary for the FINAL ACTIVE SURFACE.
-
-    Core interpretation rules:
-    - Focus primarily on the FINAL screenshot/state.
-    - Use earlier screenshots only to understand how the final state was reached.
-    - Use page summaries and action descriptions as structured evidence.
-    - Use visual action annotations only to understand which controls were used.
-    - Use outgoing actions only to understand available next actions from the final page.
-    - Do not treat outgoing actions as proof of the final page's intent.
-    - Do not treat visual action annotations as app UI content.
-    - Do not output coordinates, bounding boxes, node ids, raw edge dictionaries, overlay colors, or usage instructions.
-    - The app is already open. Never include instructions such as "open the app", "launch the app", "go to home screen", or "start from the launcher".
-
-    Active-surface rule:
-    - The current node/state is defined by the TOPMOST ACTIVE UI SURFACE in the FINAL screenshot.
-    - If a modal, dialog, bottom sheet, overflow menu, popup menu, dropdown, picker, drawer, search overlay, permission prompt, or focused panel is open, focus on that active surface as the final page/state.
-    - The dimmed or underlying page is only background context when an active overlay is present.
-    - Do NOT generate intents for the underlying page when an active overlay is present.
-    - If no overlay or focused active surface is present, use the main visible page/tab as the final page/state.
-
-    User intent rules:
-    - Return one ranked list of natural-language user intents that the CURRENT FINAL ACTIVE SURFACE itself can satisfy.
-    - Each intent must be a complete sentence describing a user navigation goal.
-    - For normal pages, tabs, settings screens, lists, management screens, configuration screens, detail pages, browsing screens, and forms, phrase intents as destination-style navigation goals.
-    - Prefer "Go to the page to ..." or "Navigate to the page to ..." over direct functional phrasing.
-    - Do NOT write direct functional intents such as "Manage configured alarms.", "Change the temperature unit.", "Block JavaScript for a specific site.", or "Select AM or PM for the new alarm time." when the final active surface is a page, form, or settings screen where that task can be done.
-    - Instead, write destination-style intents such as:
-    "Go to the page to manage configured alarms."
-    "Navigate to the page to change the temperature unit."
-    "Go to the setting for blocking JavaScript for a specific site."
-    "Go to the page to change AM or PM for a new alarm."
-
-    Control-inside-page wording rule:
-    - Visible controls such as switches, radio buttons, AM/PM selectors, checkboxes, dropdowns, text fields, sliders, buttons, or rows may be part of the page's purpose.
-    - However, if those controls are embedded inside a normal page, form, or settings screen, do not phrase the intent as directly operating that control.
-    - Phrase the intent as navigating to the page, form, screen, or setting where that control can be changed.
-    - Only use direct control-level phrasing when the topmost active surface itself is a picker, dialog, dropdown menu, popup menu, confirmation prompt, permission prompt, or focused control panel.
-
-    When direct functional phrasing is allowed:
-    - Use direct functional phrasing only when the topmost active surface itself is an immediate-action surface.
-    - Immediate-action surfaces include dialogs, confirmation prompts, standalone menus, popup menus, dropdown menus, expanded pickers, permission prompts, and focused panels.
-    - A normal page, form, or settings screen containing selectable controls is NOT an immediate-action surface.
-
-    Strict outgoing-action rule:
-    - outgoing_actions are provided only to prevent confusing current-state purpose with next-page destinations.
-    - Do NOT include destination-specific intents that require taking an outgoing edge.
-    - Do NOT create "Go to X" intents from outgoing actions.
-    - If an outgoing action opens a new page, do not treat that new page's purpose as an intent of the current active state.
-
-    Before finalizing:
-    - Identify the topmost active UI surface in the FINAL screenshot.
-    - user_intents must be complete natural-language sentences.
-    - For page-like states, user_intents must be destination-style navigation goals.
-    - For forms and settings screens, user_intents must describe navigating to the form or setting where controls can be changed.
-    - For embedded controls inside a page/form/settings screen, user_intents must not be phrased as directly operating the control.
-    - For immediate-action surfaces, user_intents may be direct functional goals.
-    - user_intents must remain one single ranked list.
-    - user_intents must not include destination-specific intents requiring an outgoing edge.
-
-    Enhanced page summary rules:
-    - enhanced_page_summary describes the FINAL ACTIVE SURFACE for downstream navigation-memory generation.
-    - Base it primarily on the FINAL screenshot; use the provided compact page summary only as a starting hint.
-    - Include navigation-useful visual anchors: selected tabs, header/footer regions, prominent icons, list vs form layout, and open overlays.
-    - tag is a short page label of at most 5 words for waypoint naming and navigation memory.
-    - If the FINAL screenshot shows a clear page title, toolbar title, dialog title, header label, or selected settings row title, use that text as tag (trimmed to 5 words max).
-    - If no clear title is visible, assign a concise tag from the page content, active tab/subtab, and available actions, such as "settings", "sleep settings", or "alarm list".
-    - tag must be a short noun phrase, not a sentence; do not include verbs like "go to" or "open".
-    - active_tab, active_subtab, and page_purpose should refine the compact summary when the screenshot supports it; use null for unclear tabs/subtabs.
-    - screen_type should be a short label such as main_tab, settings_list, modal, dialog, form, detail_page, picker, or search_overlay.
-    - selected_navigation should describe the currently selected tab, filter, section, or active navigation state.
-    - visual_landmarks should list 2-6 short phrases naming stable visual cues an agent can match on screen.
-    - regions should briefly describe top_bar, main_area, and bottom_nav when visible; use empty strings for absent regions.
-    - salient_controls should list up to 8 important tappable controls with label, rough region, and role.
-    - Do not output coordinates, bounding boxes, node ids, or overlay annotation colors.
-
-    Return valid JSON only with exactly this schema:
-    {
-    "user_intents": [
-        "..."
-    ],
-    "enhanced_page_summary": {
-        "tag": "string",
-        "active_tab": "string or null",
-        "active_subtab": "string or null",
-        "page_purpose": "string",
-        "screen_type": "string",
-        "selected_navigation": "string",
-        "visual_landmarks": ["string"],
-        "regions": {
-            "top_bar": "string",
-            "main_area": "string",
-            "bottom_nav": "string"
-        },
-        "salient_controls": [
-            {
-                "label": "string",
-                "region": "string",
-                "role": "string"
-            }
-        ]
-    }
-    }
-    """.strip()
-
-        path_summaries = path.get("enhanced_page_summaries") or path.get("page_summaries") or []
-        compact_final_summary = path_summaries[-1] if path_summaries else ""
-
-        user_prompt = f"""
-    You are given one visual navigation path to a FINAL mobile app page/state.
-
-    Important:
-    - The app is already open.
-    - Do NOT include any instruction to open, launch, or start the app.
-    - The screenshots are provided in order.
-    - The LAST screenshot is the FINAL target state.
-    - The LAST screenshot has higher resolution and should receive the most attention.
-    - Earlier screenshots are lower-resolution route context only.
-    - Some screenshots contain visualized action annotations showing the action taken from that page.
-    - These annotations are not app UI content; use them only to understand the route.
-    - enhanced_page_summaries and actions are ordered from the start page to the final state.
-    - actions[i] describes the transition from enhanced_page_summaries[i] to enhanced_page_summaries[i + 1].
-
-    Critical active-surface instruction:
-    - In the FINAL screenshot, first identify the topmost active UI surface.
-    - If a modal, dialog, bottom sheet, overflow menu, popup menu, dropdown menu, expanded picker, drawer, search overlay, permission prompt, or focused panel is open, focus on that active surface.
-    - The underlying page is only background context when an active overlay is present.
-    - Do NOT generate intents for the underlying page when the active surface is a modal/menu/dialog/picker.
-
-    Critical destination-intent instruction:
-    - user_intents must describe what page, form, screen, tab, setting, or active surface the user wants to navigate to.
-    - For normal pages, tabs, settings screens, lists, management screens, configuration screens, detail pages, browsing screens, and forms, every intent must be destination-style.
-    - Do NOT phrase intents as directly doing the task when the final state is a page/form/settings screen.
-    - For embedded controls inside a page/form/settings screen, user_intents must describe navigating to the place where the control can be changed.
-
-    Critical distinction:
-    - actions describe how the final state was reached.
-    - outgoing_actions describe actions available FROM the final state.
-    - outgoing_actions are NOT necessarily the main purpose of the final state.
-    - Do NOT include destination-specific intents that require taking an outgoing edge.
-
-    Ordered enhanced page summaries along the path:
-    {json.dumps(path_summaries, ensure_ascii=False)}
-
-    Compact page summary for the FINAL state (enrich this into enhanced_page_summary):
-    {compact_final_summary}
-
-    Ordered action descriptions used to reach the final state:
-    {clean_actions(path["actions"])}
-
-    Outgoing actions available from the final state:
-    {clean_outgoing_edges(out_edges)}
-
-    Generate JSON for the FINAL ACTIVE SURFACE only.
-
-    Output requirements:
-    - Return user_intents and enhanced_page_summary.
-    - user_intents must be one ranked list only.
-    - user_intents must be complete natural-language sentences.
-    - For page-like states, form states, and settings states, user_intents must be destination-style navigation goals.
-    - Do NOT generate direct control-operation intents unless the control is the topmost active picker/dialog/menu/focused panel.
-    - Do NOT include destination-specific intents that require taking an outgoing edge.
-    - enhanced_page_summary must describe only the FINAL ACTIVE SURFACE.
-    - tag must be at most 5 words and suitable for use as a waypoint name in a navigation plan.
-    - Do not output coordinates, bounding boxes, node ids, raw edge dictionaries, visual overlay descriptions, or usage instructions.
-
-    Return JSON only.
-    """.strip()
-
-        screenshot_uris = []
-
-        for i, screenshot in enumerate(path["screenshots"]):
-            if screenshot is None:
-                raise FileNotFoundError(f"Missing screenshot at path step {i}")
-
-            is_final = i == len(path["screenshots"]) - 1
-
-            max_side = (
-                self.configs.post_process.vlm_processing_img_size_for_last_screenshot
-                if is_final
-                else self.configs.post_process.vlm_processing_img_size_for_other_screenshots
-            )
-
-            quality = (
-                self.configs.post_process.vlm_processing_img_quality_for_last_screenshot
-                if is_final
-                else self.configs.post_process.vlm_processing_img_quality_for_other_screenshots
-            )
-
-            _, _, data_uri = resize_and_encode_to_base64(
-                screenshot,
-                target_size=max_side,
-                jpeg_quality=quality,
-            )
-
-            screenshot_uris.append(data_uri)
-
-        user_content = [{"text": user_prompt}]
-
-        for i, data_uri in enumerate(screenshot_uris):
-            is_final = i == len(screenshot_uris) - 1
-
-            label = (
-                f"Screenshot {i + 1}/{len(screenshot_uris)}: "
-                + (
-                    "FINAL TARGET PAGE/STATE. Focus mainly on this image."
-                    if is_final
-                    else "Lower-resolution route context only."
+            if response.status_code != 200:
+                last_error = RuntimeError(
+                    f"VLM call failed: status_code={response.status_code}, "
+                    f"code={getattr(response, 'code', None)}, "
+                    f"message={getattr(response, 'message', None)}"
                 )
-            )
-
-            user_content.append({"text": label})
-            user_content.append({"image": data_uri})
-
-        messages = [
-            {
-                "role": "system",
-                "content": [{"text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": user_content,
-            },
-        ]
-
-        response = dashscope.MultiModalConversation.call(
-            model=self._post_process_model_for_node_intents(),
-            messages=messages,
-            response_format={"type": "json_object"},
-            vl_high_resolution_images=True,
-            temperature=0.0,
-            seed=42,
-            top_p=0.9,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"VLM call failed: status_code={response.status_code} "
-                f"code={getattr(response, 'code', None)} "
-                f"message={getattr(response, 'message', None)}"
-            )
-
-        content = response.output.choices[0].message.content
-
-        if isinstance(content, list):
-            text = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict)
-            )
-        else:
-            text = content
-
-        text = text.strip()
-
-        if text.startswith("```json"):
-            text = text.removeprefix("```json").removesuffix("```").strip()
-        elif text.startswith("```"):
-            text = text.removeprefix("```").removesuffix("```").strip()
-
-        output = json.loads(text)
-
-        return {
-            "user_intents": output.get("user_intents", []),
-            "enhanced_page_summary": output.get("enhanced_page_summary", {}),
-        }
-
-
-    def get_node_navigation_plans(self, paths):
-        """
-        Generate route/navigation plans for all paths using only page_summaries and actions,
-        but call Qwen through MultiModalConversation for qwen3.6-plus style usage.
-
-        Input:
-            paths:
-                dict[root_id -> path]
-            where each path has:
-                {
-                    "enhanced_page_summaries": [...],
-                    "actions": [...]
-                }
-
-        Output:
-            [
-                {
-                    "root_ids": [...],
-                    "ui_navigation_memory": {
-                        "relevant_waypoint_sequence": [...],
-                        "transition_hints": [...]
-                    }
-                },
-                ...  (at most 3 clustered plans)
-            ]
-        """
-        import json
-        import dashscope
-
-        def clean_actions(actions):
-            cleaned_steps = []
-
-            for step_edges in actions:
-                cleaned_edges = []
-
-                if isinstance(step_edges, dict):
-                    edge_items = step_edges.values()
-                elif isinstance(step_edges, list):
-                    edge_items = step_edges
+                if attempt < max_attempts:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+                    continue
+                raise last_error
+            try:
+                choices = response.output.choices
+                if not choices:
+                    raise ValueError("VLM response has no choices")
+                content = choices[0].message.content
+                if isinstance(content, list):
+                    text = "".join(
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    ).strip()
                 else:
-                    edge_items = []
+                    text = str(content or "").strip()
+                if not text:
+                    raise ValueError(
+                        "VLM returned empty text content. "
+                        f"raw_content={content!r}"
+                    )
+                output = parse_json_from_model_response(text)
+            except (ValueError, json.JSONDecodeError, AttributeError, IndexError, TypeError) as exc:
+                last_error = exc
+                if attempt < max_attempts:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+                    continue
+                raise ValueError(
+                    "Failed to parse node-level VLM response.\n"
+                    f"model={model_name}, attempt={attempt}/{max_attempts}\n"
+                    f"raw_content={content!r}\n"
+                    f"raw_text={text!r}\n"
+                    f"error={exc}"
+                ) from exc
+            page_description = output.get("page_description", {})
+            if not isinstance(page_description, dict):
+                page_description = {}
+            return {
+                "page_description": {
+                    "high_level": str(page_description.get("high_level", "") or "").strip(),
+                    "medium_level": str(page_description.get("medium_level", "") or "").strip(),
+                    "low_level": str(page_description.get("low_level", "") or "").strip(),
+                }
+            }
+        raise last_error or RuntimeError("VLM call failed after retries")
 
-                for attrs in edge_items:
-                    if not isinstance(attrs, dict):
-                        continue
-
-                    cleaned_edges.append({
-                        "type": attrs.get("type", ""),
-                        "description": attrs.get("description", "")
-                    })
-
-                cleaned_steps.append(cleaned_edges)
-
-            return cleaned_steps
-
-        system_prompt = """
-    You are a precise mobile UI navigation-memory generator.
-
-    You are given one or more in-app navigation paths represented only by:
-    - ordered enhanced page summaries (tag, landmarks, regions, salient controls)
-    - ordered action descriptions between consecutive pages
-
-    IMPORTANT runtime assumption:
-    At inference time the agent always starts from a reset landing screen (app relaunched to a
-    canonical home/main tab). The agent is ALREADY on that shared landing unless the screenshot
-    shows a blocker (incognito overlay, dialog, permission sheet, wrong tab, etc.).
-    Navigation plans must be written for that runtime, NOT for replaying exploration roots.
-
-    Task:
-    Cluster the input paths and generate at most 3 compact route-memory plans total.
-    Do NOT emit one plan per root.
-
-    Clustering rules:
-    - Cluster by the ROUTE AFTER paths converge on the same shared landing/main screen, not by
-      which exploration root_id each path started from.
-    - Merge paths when they share the same post-landing waypoint suffix and the same navigation
-      actions after the shared landing (prefer tag fields from enhanced_page_summaries).
-    - Do NOT create separate plans only because exploration started in incognito, on a dialog,
-      on a permission overlay, on a filter-strip variant of home, or on a slightly different
-      home-feed label. Those are recovery differences, not distinct routes.
-    - Keep separate plans ONLY when the post-landing route truly diverges (e.g. reaches the
-      target via You tab vs Library tab, or via Settings vs a deep link path).
-    - Return at most 3 navigation plans total.
-    - Every input root_id must appear in exactly one plan's root_ids list.
-    - Do not omit any input root_id.
-
-    For each clustered plan, generate:
-    - root_ids: all input roots belonging to this cluster
-    - relevant_waypoint_sequence
-    - transition_hints
-
-    Do NOT generate user_intents.
-    Do NOT infer new page purposes beyond the provided enhanced page summaries.
-    Do NOT include app launch, phone home screen, or OS-level states.
-    Do NOT include coordinates, node ids, screenshots, raw edge dictionaries, visual overlay descriptions, or usage instructions.
-
-    Rules for relevant_waypoint_sequence:
-    - Use semantic page/state names, not raw actions.
-    - Prefer each page's tag field from enhanced_page_summaries when available; combine with
-      active_tab when needed for clarity (e.g. "Home feed" not "YouTube Home" vs "YouTube Home Feed").
-    - The final waypoint must be the final page/state from the last enhanced page summary.
-    - Do NOT include the shared reset landing screen (main tab / home feed) as a waypoint if all
-      paths pass through it before the first meaningful navigation action.
-    - Start waypoints at the first screen where the agent must take an action toward the target
-      (e.g. start at "You" or "Settings", not "Home feed").
-    - Never use exploration-only entry states as waypoints: incognito mode, splash screens, dialogs,
-      permission overlays, or "open app" states belong in transition_hints as optional recovery
-      steps, NOT in relevant_waypoint_sequence.
-    - Never include "Open app", "Launch app", "Phone home screen", or OS-level states.
-    - Never repeat the same waypoint consecutively.
-    - Every waypoint must be inside the same app and move toward the final page/state.
-    - Remove duplicate pages, loops, retries, and backtracking.
-    - Do not include child-page detours if the final page is a parent page.
-    - The waypoint sequence should describe how to reach the final page/state, not what can be done after reaching it.
-    - Omit parent/category waypoints that the path never visibly lands on. If the path reaches the
-      target via a specific list row or deep link (e.g. tap "Your Addresses"), do NOT insert a
-      generic parent waypoint (e.g. "Account settings") unless that parent screen is actually shown.
-    - Each waypoint must correspond to a distinct visible screen the agent lands on after an action.
-      Do not invent intermediate waypoints from graph labels that do not match the tapped control
-      or visible screen title.
-
-    Rules for transition_hints:
-    - transition_hints are a COMPLETE ordered replay of EVERY navigation action in the input path
-      (tap, scroll, swipe, back if needed). Do not skip, merge away, or summarize away any action.
-      The number of hints may be GREATER than the number of waypoints because scroll/swipe steps
-      often occur on the same screen and do not create new waypoints.
-    - Before returning JSON, verify: every action in the path (by type + description) is represented
-      by at least one hint in the same order. If an action is missing, add the hint.
-    - Every input action with type scroll or swipe MUST appear in transition_hints — either as its
-      own hint or clearly embedded in an adjacent hint. Never silently drop scroll/swipe steps.
-    - For each scroll/swipe hint, state: direction (up/down/left/right), region (main list,
-      settings list, filter strip, carousel, feed, bottom sheet), and purpose (what target or
-      next waypoint it helps reveal).
-    - For tap/click actions, use the EXACT control label from the action description (button text,
-      list row title, tab name, icon role). Do not substitute a different control.
-    - CRITICAL — hub/list branching: on hub, menu, or settings-list screens, each row opens a
-      DIFFERENT destination. A tap hint must NOT claim control A opens screen B when the action
-      description says control A (e.g. "Your Addresses" must open the addresses screen, not
-      "Account settings"; "Account" opens account settings). Match control → destination precisely.
-    - After each tap hint, the screen reached must match the NEXT waypoint name (or the visible
-      title if it differs from tag). If the tapped row label differs from the waypoint tag,
-      prefer the waypoint name and the correct row for that waypoint — never cross-wire rows.
-    - For tap/click actions, convert descriptions into robust agent instructions with stable
-      regions (top-right menu, bottom tab, settings list, search field, modal, bottom sheet).
-    - If the path contains scroll/swipe then tap X, preserve the scroll/swipe step explicitly;
-      do NOT collapse it into only "tap X" when a scroll/swipe action exists between those screens.
-    - If some exploration paths required recovery before the shared route (incognito off, dismiss dialog,
-      switch tab, swipe filter strip), put those as OPTIONAL first hints prefixed with "If visible:" or
-      "Only if needed:" — do NOT make them waypoints and do NOT create a separate plan for them alone.
-    - Assume the agent already stands on the reset landing screen; the first hint should usually advance
-      toward the first waypoint, not re-describe being on home unless recovery is required.
-    - Avoid exact coordinates, bounding boxes, fragile visual details, and overlay colors.
-    - Never include "open the app" or "launch the app".
-    - Do not include actions that happen after the final page/state is reached.
-    - Do not write usage instructions or describe what the page can be used for.
-
-    Return valid JSON only with exactly this schema:
-    {
-    "navigation_plans": [
-        {
-        "root_ids": ["..."],
-        "ui_navigation_memory": {
-            "relevant_waypoint_sequence": [
-            "..."
-            ],
-            "transition_hints": [
-            "..."
-            ]
-        }
-        }
-    ]
-    }
-    """.strip()
-
-        if isinstance(paths, dict):
-            path_items = list(paths.items())
-        else:
-            path_items = [(str(i), path) for i, path in enumerate(paths)]
-
-        input_root_ids = [str(root_id) for root_id, _ in path_items]
-        compact_paths = []
-
-        for root_id, path in path_items:
-            compact_paths.append({
-                "root_id": str(root_id),
-                "enhanced_page_summaries": (
-                    path.get("enhanced_page_summaries")
-                    or path.get("page_summaries", [])
-                ),
-                "actions": clean_actions(path.get("actions", [])),
-            })
-
-        num_paths = len(compact_paths)
-        user_prompt = f"""
-    You are given {num_paths} in-app navigation paths to the same FINAL node/page/state.
-
-    Paths may start from different exploration roots, but at inference the agent begins on a reset
-    landing screen (shared home/main tab). Generate plans for that runtime: merge paths that only
-    differ in leading landing/recovery steps, and omit shared landing screens from waypoints.
-
-    Cluster semantically equivalent post-landing routes and return at most 3 navigation plans total.
-    Every input root_id must appear in exactly one root_ids list.
-    Do NOT emit one plan per root.
-
-    Do NOT generate user_intents.
-    Do NOT use screenshots.
-    Do NOT include app launch or phone home screen steps.
-
-    Input root ids:
-    {json.dumps(input_root_ids, ensure_ascii=False)}
-
-    Paths:
-    {json.dumps(compact_paths, ensure_ascii=False, indent=2)}
-
-    Return JSON only.
-    """.strip()
-
-        messages = [
-            {
-                "role": "system",
-                "content": [{"text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [{"text": user_prompt}],
-            },
-        ]
-
-        response = dashscope.MultiModalConversation.call(
-            model=self._post_process_model_for_node_navigation_plans(),
-            messages=messages,
-            response_format={"type": "json_object"},
-            vl_high_resolution_images=True,
-            temperature=0.0,
-            seed=42,
-            top_p=0.9,
-        )
-
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"LLM/VLM-style call failed: status_code={response.status_code} "
-                f"code={getattr(response, 'code', None)} "
-                f"message={getattr(response, 'message', None)}"
-            )
-
-        content = response.output.choices[0].message.content
-
-        if isinstance(content, list):
-            text = "".join(
-                item.get("text", "")
-                for item in content
-                if isinstance(item, dict)
-            )
-        else:
-            text = content
-
-        text = text.strip()
-
-        if text.startswith("```json"):
-            text = text.removeprefix("```json").removesuffix("```").strip()
-        elif text.startswith("```"):
-            text = text.removeprefix("```").removesuffix("```").strip()
-
-        output = json.loads(text)
-
-        return output.get("navigation_plans", [])
 
     def get_transition_info(
         self,
@@ -2194,551 +1371,110 @@ class VLM:
         source_node_level_information,
         target_node_level_information,
     ):
-        """
-        Pass 2: Transition-group interpretation.
-
-        Unit:
-            source node -> target node, with one or more parallel action variants.
-
-        Inputs:
-            action_crops:
-                Optional visual evidence for actions.
-                Supported forms:
-                - dict: {edge_id: crop_or_annotated_image}
-                - dict: {edge_id: {"image": crop_or_annotated_image, ...}}
-                - list: [crop1, crop2, ...] matched to edge_data order if possible
-
-            edge_data:
-                Parallel edges/actions from the same source node to the same target node.
-                Supported forms:
-                - {edge_id: {"type": "...", "description": "...", "boundingBox": [...]}}
-                - [{"edge_id": "...", "type": "...", "description": "..."}]
-                - networkx-like edge attrs list/dict
-
-            source_node_level_information:
-                Output from get_node_level_information() for source node.
-
-            target_node_level_information:
-                Output from get_node_level_information() for target node.
-
-        Output:
-            {
-                "transition_group_observation": {
-                    ...
-                }
-            }
-
-        This pass:
-        - preserves every action variant
-        - summarizes the shared source->target transition once
-        - extracts executable action signatures for final route planning
-
-        This pass does NOT:
-        - generate user intents
-        - generate final navigation plans
-        - decide whether the transition is canonical/noisy/useful globally
-        """
-        import json
-        import dashscope
-
-        def normalize_json_like(obj):
-            if obj is None:
-                return ""
-
-            if isinstance(obj, str):
-                return obj.strip()
-
-            try:
-                return json.dumps(obj, ensure_ascii=False, indent=2)
-            except Exception:
-                return str(obj)
-
-        def unwrap_node_observation(node_info):
-            """
-            Accept either:
-            {"node_observation": {...}}
-            or direct node_observation dict.
-            """
-            if not isinstance(node_info, dict):
-                return node_info
-
-            if "node_observation" in node_info:
-                return node_info["node_observation"]
-
-            return node_info
-
-        def normalize_edge_data(edge_data):
-            """
-            Convert edge_data into a list of action variants:
-            [
-                {
-                    "edge_id": "0",
-                    "action_type": "tap/nav/scroll/...",
-                    "action_description": "...",
-                    "bounding_box": [...]
-                }
-            ]
-            """
-            variants = []
-
-            if edge_data is None:
-                return variants
-
-            if isinstance(edge_data, dict):
-                items = list(edge_data.items())
-
-                for edge_id, attrs in items:
-                    if isinstance(attrs, str):
-                        variants.append({
-                            "edge_id": str(edge_id),
-                            "action_type": "",
-                            "action_description": attrs.strip(),
-                            "bounding_box": None,
-                        })
-                        continue
-
-                    if not isinstance(attrs, dict):
-                        variants.append({
-                            "edge_id": str(edge_id),
-                            "action_type": "",
-                            "action_description": str(attrs),
-                            "bounding_box": None,
-                        })
-                        continue
-
-                    desc = (
-                        attrs.get("description")
-                        or attrs.get("action_description")
-                        or attrs.get("label")
-                        or ""
-                    )
-
-                    variants.append({
-                        "edge_id": str(edge_id),
-                        "action_type": attrs.get("type", ""),
-                        "action_description": desc,
-                        "bounding_box": (
-                            attrs.get("boundingBox")
-                            or attrs.get("bounding_box")
-                            or attrs.get("bbox")
-                        ),
-                    })
-
-            elif isinstance(edge_data, list):
-                for i, item in enumerate(edge_data):
-                    if isinstance(item, str):
-                        variants.append({
-                            "edge_id": str(i),
-                            "action_type": "",
-                            "action_description": item.strip(),
-                            "bounding_box": None,
-                        })
-                        continue
-
-                    if not isinstance(item, dict):
-                        variants.append({
-                            "edge_id": str(i),
-                            "action_type": "",
-                            "action_description": str(item),
-                            "bounding_box": None,
-                        })
-                        continue
-
-                    edge_id = (
-                        item.get("edge_id")
-                        or item.get("id")
-                        or item.get("key")
-                        or str(i)
-                    )
-
-                    desc = (
-                        item.get("description")
-                        or item.get("action_description")
-                        or item.get("label")
-                        or ""
-                    )
-
-                    variants.append({
-                        "edge_id": str(edge_id),
-                        "action_type": item.get("type", ""),
-                        "action_description": desc,
-                        "bounding_box": (
-                            item.get("boundingBox")
-                            or item.get("bounding_box")
-                            or item.get("bbox")
-                        ),
-                    })
-
-            else:
-                variants.append({
-                    "edge_id": "0",
-                    "action_type": "",
-                    "action_description": str(edge_data),
-                    "bounding_box": None,
-                })
-
-            # Preserve order, remove exact duplicate edge_id + description pairs.
-            seen = set()
-            deduped = []
-
-            for variant in variants:
-                key = (
-                    variant.get("edge_id", ""),
-                    variant.get("action_type", ""),
-                    variant.get("action_description", ""),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(variant)
-
-            return deduped
-
-        def normalize_action_crops(action_crops, action_variants):
-            """
-            Returns list:
-            [
-                {
-                    "edge_id": "...",
-                    "image": image_obj_or_path,
-                    "note": "..."
-                }
-            ]
-            """
-            if not action_crops:
-                return []
-
-            normalized = []
-
-            if isinstance(action_crops, dict):
-                for edge_id, value in action_crops.items():
-                    if value is None:
-                        continue
-
-                    if isinstance(value, dict):
-                        image = (
-                            value.get("image")
-                            or value.get("crop")
-                            or value.get("screenshot")
-                            or value.get("visualized_action")
-                        )
-                        note = value.get("note", "")
-                    else:
-                        image = value
-                        note = ""
-
-                    if image is not None:
-                        normalized.append({
-                            "edge_id": str(edge_id),
-                            "image": image,
-                            "note": note,
-                        })
-
-            elif isinstance(action_crops, list):
-                for i, value in enumerate(action_crops):
-                    if value is None:
-                        continue
-
-                    if i < len(action_variants):
-                        edge_id = action_variants[i]["edge_id"]
-                    else:
-                        edge_id = str(i)
-
-                    if isinstance(value, dict):
-                        image = (
-                            value.get("image")
-                            or value.get("crop")
-                            or value.get("screenshot")
-                            or value.get("visualized_action")
-                        )
-                        note = value.get("note", "")
-                        edge_id = str(value.get("edge_id", edge_id))
-                    else:
-                        image = value
-                        note = ""
-
-                    if image is not None:
-                        normalized.append({
-                            "edge_id": str(edge_id),
-                            "image": image,
-                            "note": note,
-                        })
-
-            else:
-                # Single crop/image. Attach to first edge if possible.
-                edge_id = action_variants[0]["edge_id"] if action_variants else "0"
-                normalized.append({
-                    "edge_id": str(edge_id),
-                    "image": action_crops,
-                    "note": "",
-                })
-
-            return normalized
-
-        def extract_response_text(response):
-            content = response.output.choices[0].message.content
-
-            if isinstance(content, list):
-                text = "".join(
-                    item.get("text", "")
-                    for item in content
-                    if isinstance(item, dict)
-                )
-            else:
-                text = content
-
-            text = text.strip()
-
-            if text.startswith("```json"):
-                text = text.removeprefix("```json").removesuffix("```").strip()
-            elif text.startswith("```"):
-                text = text.removeprefix("```").removesuffix("```").strip()
-
-            return text
-
-        def ensure_schema(output, action_variants):
-            if not isinstance(output, dict):
-                output = {}
-
-            obs = output.setdefault("transition_group_observation", {})
-
-            obs.setdefault("source_active_surface_summary", "")
-            obs.setdefault("target_active_surface_summary", "")
-            obs.setdefault("overall_transition_summary", "")
-
-            obs.setdefault("transition_type_candidates", [])
-            obs.setdefault("action_variants", [])
-            obs.setdefault("target_context_bridge", {})
-            obs.setdefault("local_ambiguity", [])
-            obs.setdefault("interpretation_reliability", {})
-
-            obs["target_context_bridge"].setdefault("context_carried_from_source", "")
-            obs["target_context_bridge"].setdefault("target_disambiguation_hint", "")
-            obs["target_context_bridge"].setdefault("evidence", [])
-            obs["target_context_bridge"].setdefault("uncertainty", [])
-
-            obs["interpretation_reliability"].setdefault("level", "medium")
-            obs["interpretation_reliability"].setdefault("reason", "")
-
-            # If the model omitted action variants, create safe defaults.
-            if not obs["action_variants"]:
-                for variant in action_variants:
-                    obs["action_variants"].append({
-                        "edge_id": variant.get("edge_id", ""),
-                        "action_description": variant.get("action_description", ""),
-                        "variant_group": "unclear",
-                        "matched_source_element": "",
-                        "source_region": "unknown",
-                        "source_visual_container": "unknown",
-                        "local_action_meaning": "",
-                        "executable_action_signature": {
-                            "primary_instruction": variant.get("action_description", ""),
-                            "target_label": "",
-                            "target_icon_description": "",
-                            "target_region": "",
-                            "nearby_visual_anchors": [],
-                            "state_or_selection_cue": "",
-                            "fallback_instruction": "",
-                            "do_not_confuse_with": [],
-                        },
-                        "distinction_from_other_variants": "",
-                    })
-
-            # Ensure nested executable_action_signature exists.
-            for item in obs["action_variants"]:
-                item.setdefault("edge_id", "")
-                item.setdefault("action_description", "")
-                item.setdefault("variant_group", "unclear")
-                item.setdefault("matched_source_element", "")
-                item.setdefault("source_region", "unknown")
-                item.setdefault("source_visual_container", "unknown")
-                item.setdefault("local_action_meaning", "")
-                item.setdefault("distinction_from_other_variants", "")
-
-                sig = item.setdefault("executable_action_signature", {})
-                sig.setdefault("primary_instruction", item.get("action_description", ""))
-                sig.setdefault("target_label", "")
-                sig.setdefault("target_icon_description", "")
-                sig.setdefault("target_region", "")
-                sig.setdefault("nearby_visual_anchors", [])
-                sig.setdefault("state_or_selection_cue", "")
-                sig.setdefault("fallback_instruction", "")
-                sig.setdefault("do_not_confuse_with", [])
-
-            return output
-
-        source_node_observation = unwrap_node_observation(source_node_level_information)
-        target_node_observation = unwrap_node_observation(target_node_level_information)
-
-        action_variants = normalize_edge_data(edge_data)
-        crop_items = normalize_action_crops(action_crops, action_variants)
-
-        source_text = normalize_json_like(source_node_observation)
-        target_text = normalize_json_like(target_node_observation)
-        actions_text = normalize_json_like(action_variants)
 
         system_prompt = """
-    You are a mobile UI transition-group observation module.
+        You describe UI actions between two mobile UI states.
 
-    You are given:
-    - a source node observation
-    - a target node observation
-    - one or more action descriptions collected during exploration that all moved from the same source node to the same target node
-    - optional visual evidence showing action crops or annotated source screenshots
+        You are given:
+        - source page description
+        - target page description
+        - one or more action descriptions
+        - optional action crop images
+        - normalized action bounding boxes in edge_data, if available
 
-    Your task is to interpret this source-to-target transition group.
+        Your task:
+        Create a compact list of action descriptions.
 
-    The action descriptions may be duplicate descriptions of the same control, label/icon variants of the same control, alternative controls that reach the same target, dismiss/back variants, scroll variants, or genuinely different actions that happen to reach the same target.
+        Each output item represents one action cluster.
 
-    Preserve every raw action as an action_variant.
-    Summarize the shared source-to-target transition once at the group level.
+        For each cluster:
+        - low_level_action_description: visual grounding description of what to find/tap, including appearance and rough location.
+        - high_level_action_description: generalized functional action.
 
-    Visual evidence may contain annotations such as boxes, markers, arrows, or highlights. These annotations are not app UI content. Use them only to identify the action target or interacted region.
+        Low-level action description rules:
+        - Describe the action target's visual appearance, visible text/icon, component type, and rough location.
+        - Use normalized bounding boxes only to infer rough location such as top-left, top-right, center, lower-right, bottom navigation, upper content area, etc.
+        - Do not output raw coordinates or bounding boxes.
+        - Mention nearby stable visual anchors only if useful for grounding.
+        - Prefer stable visual descriptions over dynamic labels, product names, prices, personal names, percentages, or temporary values.
+        - If there is only one action, describe it specifically enough for grounding.
+        - If multiple similar actions exist, generalize the shared visual pattern and location.
 
-    Do not generate user intents.
-    Do not generate final navigation plans.
-    Do not decide whether this transition is globally stable, noisy, useful, or canonical.
-    Do not decide whether this transition should be used in the final route.
+        Rules:
+        - If multiple actions are visually/functionally similar, group them into one cluster.
+        - If actions differ only by dynamic/specific text, product names, prices, personal details, percentages, or item-specific labels, generalize them.
+        - Prefer stable descriptions over dynamic content.
+        - Do not describe the target page effect.
+        - Do not include confidence, ambiguity, raw coordinates, bounding boxes, node ids, or extra metadata.
+        - Return JSON only. Do not add extra fields.
+        """.strip()
 
-    For each action_variant, preserve execution-useful detail in executable_action_signature. The final planner may keep only one action variant, so the signature must contain enough information for an executor to perform the action without seeing the original edge.
-
-    Return JSON only using the requested schema. Do not add extra fields.
-    """.strip()
 
         user_prompt = f"""
-    Source node observation:
-    {source_text}
+        Source node level information:
+        {json.dumps(source_node_level_information, ensure_ascii=False, indent=2)}
 
-    Target node observation:
-    {target_text}
+        Target node level information:
+        {json.dumps(target_node_level_information, ensure_ascii=False, indent=2)}
 
-    Action variants from source node to target node:
-    {actions_text}
+        Edge/action data:
+        {json.dumps(edge_data, ensure_ascii=False, indent=2)}
 
-    Return JSON with exactly this schema:
+        Return exactly this JSON schema:
 
-    {{
-    "transition_group_observation": {{
-        "source_active_surface_summary": "short summary of the source active surface",
-        "target_active_surface_summary": "short summary of the target active surface",
-
-        "overall_transition_summary": "what this source-to-target transition appears to do locally",
-
-        "transition_type_candidates": [
         {{
-            "transition_type": "switches_tab | opens_detail | opens_list | opens_editor | opens_settings | opens_menu | opens_overlay | dismisses_surface | navigates_back | scrolls_or_reveals | changes_filter_or_subtab | reselects_current_tab_or_refreshes_feed | same_surface_content_change | unknown",
-            "confidence": 0.0,
-            "evidence": "why this transition type is plausible"
-        }}
-        ],
-
-        "action_variants": [
-        {{
-            "edge_id": "copy edge_id from input action variant",
-            "action_description": "copy the raw action description",
-            "variant_group": "same_control | same_region | alternative_control | icon_label_variant | back_or_dismiss_variant | scroll_variant | unclear",
-            "matched_source_element": "source element/control/row/icon if identifiable",
-            "source_region": "top_bar | main_area | bottom_nav | overlay | unknown",
-            "source_visual_container": "toolbar | tab_bar | page_header | section_header | list_row | settings_row | content_card | feed_post_content | banner_or_prompt | form_field | modal_content | background_page | unknown",
-            "local_action_meaning": "what this action appears to do locally",
-
-            "executable_action_signature": {{
-            "primary_instruction": "robust executable instruction for this exact action",
-            "target_label": "visible text label, else empty string",
-            "target_icon_description": "icon description if icon-based, else empty string",
-            "target_region": "short region description, such as top-right toolbar or bottom-left bottom navigation",
-            "nearby_visual_anchors": [
-                "nearby stable visual cues"
+        "transition_info": [
+            {{
+            "action_ids": [
+                "edge/action id from edge_data"
             ],
-            "state_or_selection_cue": "selected/unchecked/expanded/etc. if relevant, else empty string",
-            "fallback_instruction": "alternative instruction if label/icon is partially visible",
-            "do_not_confuse_with": [
-                "similar nearby controls or regions to avoid"
-            ]
-            }},
-
-            "distinction_from_other_variants": "how this action differs from other variants, or empty string if equivalent"
-        }}
-        ],
-
-        "target_context_bridge": {{
-        "context_carried_from_source": "source-side context that should be remembered when interpreting the target, if any",
-        "target_disambiguation_hint": "how the source action/context helps explain the target node; empty string if the target is already self-explanatory",       
-        "evidence": [
-            "specific evidence supporting this bridge"
-        ],
-        "uncertainty": [
-            "what is still uncertain about this bridge"
+            "low_level_action_description": "appearance + rough location description of the action target for grounding",
+            "high_level_action_description": "generalized functional action"
+            }}
         ]
-        }},
-
-        "local_ambiguity": [
-        "ambiguities that cannot be resolved from this transition group alone"
-        ],
-
-        "interpretation_reliability": {{
-        "level": "high | medium | low",
-        "reason": "short reason"
         }}
-    }}
-    }}
 
-    Guidelines:
-    - Interpret only this source-to-target transition group.
-    - Preserve every action variant.
-    - Summarize the transition once at the group level.
-    - Do not produce user intents.
-    - Do not produce final route plans.
-    - Do not say whether this transition is canonical or should be avoided.
-    - If source context gives meaning to an otherwise generic target page, capture that in target_context_bridge.
-    - If the target page is self-explanatory and the source adds no useful context, leave target_disambiguation_hint empty.
-    - Keep icon and region details when they matter for execution, such as gear/settings icon, pencil/edit icon, overflow menu, bottom tab, search field, profile avatar, or toolbar button.
-    - Do not overgeneralize icon actions. For example, write "tap the gear/settings icon in the top-right toolbar" rather than only "open settings."
-    - Do not copy internal metadata such as order_index, boundingBox, node ids, or coordinates into human-readable fields.
-    - Use bounding boxes or order indices only to infer visual region or action target; do not mention them in the output.
-    - local_ambiguity must describe ambiguity about the transition itself, not generic variability of feed/content items.
-    - If there is no meaningful uncertainty, use an empty list [].
-    - Do not write placeholder uncertainty such as "None", "None significant", "N/A", or "No ambiguity".
-    - context_carried_from_source should describe the source-side action context, not just the previous page.
-    Example: write "The Video bottom-navigation tab was selected" rather than "The user was previously on Home."
-    - Return valid JSON only.
-    """.strip()
+        Guidelines:
+        - If all actions are equivalent, return one item containing all action_ids.
+        - If actions are meaningfully different, return multiple items.
+        - For low_level_action_description, include what the target looks like and where it is roughly located.
+        - Use boundingBox only to infer rough location; do not output coordinates.
+        - Good low-level examples:
+        - "Tap the Top Rankings card with a trophy/ranking icon in the upper-right quick-action row."
+        - "Tap the pill-shaped Unread filter chip near the top of the message list."
+        - "Tap the Messenger tab with the chat bubble icon in the bottom navigation bar."
+        - Good high-level examples:
+        - "Open the Top Ranking product list."
+        - "Filter messages by unread status."
+        - "Switch to the Messenger section."
+        - Do not include transition_effect.
+        - Do not include markdown or extra text.
+        """.strip()
 
-        user_content = [{"text": user_prompt}]
+        content = [{"text": user_prompt}]
 
-        # Add action crop images as optional visual evidence.
-        # Use lower/other screenshot settings because these are supporting evidence, not target-page screenshots.
-        max_side = 280
-        quality = self.configs.post_process.vlm_processing_img_quality_for_other_screenshots
+        if isinstance(action_crops, dict):
+            crop_items = list(action_crops.items())
+        elif isinstance(action_crops, list):
+            crop_items = list(enumerate(action_crops))
+        else:
+            crop_items = []
 
-        for i, item in enumerate(crop_items):
-            edge_id = item["edge_id"]
-            note = item.get("note", "")
+        max_side = self.configs.post_process.vlm_model_action_crop_size
+        quality = self.configs.post_process.vlm_model_image_quality_for_transition_info
 
-            try:
-                _, _, data_uri = resize_and_encode_to_base64(
-                    item["image"],
-                    target_size=max_side,
-                    jpeg_quality=quality,
-                )
-            except Exception as exc:
-                # Do not fail the whole transition if one crop cannot be encoded.
-                user_content.append({
-                    "text": (
-                        f"Visual evidence for edge_id={edge_id} could not be encoded: {exc}"
-                    )
-                })
+        for action_id, crop in crop_items:
+            if crop is None:
                 continue
 
-            user_content.append({
-                "text": (
-                    f"Visual evidence {i + 1}/{len(crop_items)} for edge_id={edge_id}. "
-                    "This image may contain action annotations. "
-                    "Annotations are not app UI content; use them only to identify the action target. "
-                    f"Note: {note}"
-                )
-            })
-            user_content.append({"image": data_uri})
+            _, _, data_uri = resize_and_encode_to_base64(
+                crop,
+                target_size=max_side,
+                jpeg_quality=quality,
+            )
+
+            content.append({"text": f"Action crop for action_id={action_id}"})
+            content.append({"image": data_uri})
 
         messages = [
             {
@@ -2747,21 +1483,12 @@ class VLM:
             },
             {
                 "role": "user",
-                "content": user_content,
+                "content": content,
             },
         ]
 
-        if hasattr(self, "_post_process_model_for_transition_info"):
-            model_name = self._post_process_model_for_transition_info()
-        elif hasattr(self, "_post_process_model_for_edge_level_information"):
-            model_name = self._post_process_model_for_edge_level_information()
-        elif hasattr(self, "_post_process_model_for_node_level_information"):
-            model_name = self._post_process_model_for_node_level_information()
-        else:
-            model_name = self._post_process_model_for_node_intents()
-
         response = dashscope.MultiModalConversation.call(
-            model=model_name,
+            model=self.configs.post_process.vlm_model_name_for_transition_info,
             messages=messages,
             response_format={"type": "json_object"},
             vl_high_resolution_images=True,
@@ -2770,475 +1497,95 @@ class VLM:
             top_p=0.9,
         )
 
+
         if response.status_code != 200:
             raise RuntimeError(
-                f"Transition VLM call failed: status_code={response.status_code} "
-                f"code={getattr(response, 'code', None)} "
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
                 f"message={getattr(response, 'message', None)}"
             )
 
-        text = extract_response_text(response)
+        response_content = response.output.choices[0].message.content
 
-        try:
-            output = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Failed to parse transition-info response as JSON.\n"
-                f"Raw response:\n{text}"
-            ) from exc
-
-        return ensure_schema(output, action_variants)
-
-    def get_path_conditioned_goals(self, trajectory):
-        """
-        Pass 3A: Compact path-conditioned target memory.
-
-        Input:
-            trajectory = output of prepare_path_information(...)
-
-        Output:
-            {
-                "path_conditioned_target_memory": {
-                    ...
-                }
-            }
-
-        This pass:
-        - interprets the final target node using one trajectory
-        - generates compact path-conditioned user intents/goals
-        - assesses whether this trajectory should influence target memory
-        - marks important vs weak/incidental steps
-
-        This pass does NOT:
-        - generate final executable navigation plan
-        - choose the best route
-        - merge multiple trajectories
-        """
-        import json
-        import re
-        import dashscope
-
-        def normalize_json_like(obj):
-            try:
-                return json.dumps(obj, ensure_ascii=False, indent=2)
-            except Exception:
-                return str(obj)
-
-        def extract_response_text(response):
-            content = response.output.choices[0].message.content
-
-            if isinstance(content, list):
-                text = "".join(
-                    item.get("text", "")
-                    for item in content
-                    if isinstance(item, dict)
-                )
-            else:
-                text = content
-
-            text = text.strip()
-
-            if text.startswith("```json"):
-                text = text.removeprefix("```json").removesuffix("```").strip()
-            elif text.startswith("```"):
-                text = text.removeprefix("```").removesuffix("```").strip()
-
-            return text
-
-        def ensure_schema(output, trajectory):
-            if not isinstance(output, dict):
-                output = {}
-
-            # Backward compatibility: if model returns old verbose key, map it.
-            if "path_conditioned_target_memory" not in output:
-                if "path_conditioned_target_info" in output:
-                    old = output["path_conditioned_target_info"]
-                    output["path_conditioned_target_memory"] = {
-                        "trajectory_id": old.get("trajectory_id", ""),
-                        "root_node_id": old.get("root_node_id", ""),
-                        "target_node_id": old.get("target_node_id", ""),
-                        "path_length": old.get("path_length", 0),
-                        "target_tag": old.get("conditioned_target_summary", {}).get("tag", ""),
-                        "path_summary": old.get("path_summary", ""),
-                        "conditioned_target_summary": old.get("conditioned_target_summary", {}).get(
-                            "conditioned_page_summary", ""
-                        ),
-                        "conditioned_target_purpose": old.get("conditioned_target_summary", {}).get(
-                            "conditioned_page_purpose", ""
-                        ),
-                        "target_entity_or_scope": old.get("conditioned_target_summary", {}).get(
-                            "target_entity_or_scope", ""
-                        ),
-                        "screen_type": old.get("conditioned_target_summary", {}).get(
-                            "screen_type", "unknown"
-                        ),
-                        "supported_user_intents": [
-                            {
-                                "intent": item.get("intent", ""),
-                                "intent_type": item.get("intent_type", "unknown"),
-                                "confidence": item.get("confidence", 0.0),
-                            }
-                            for item in old.get("path_conditioned_user_intents", [])
-                        ],
-                        "trajectory_assessment": old.get("trajectory_assessment", {}),
-                        "important_steps": [
-                            {
-                                "step_index": item.get("step_index", 0),
-                                "meaning": item.get("why_it_matters", ""),
-                            }
-                            for item in old.get("trajectory_semantics", {}).get(
-                                "key_disambiguating_steps", []
-                            )
-                        ],
-                        "weak_or_incidental_steps": [
-                            {
-                                "step_index": item.get("step_index", 0),
-                                "reason": item.get("reason", ""),
-                            }
-                            for item in (
-                                old.get("trajectory_semantics", {}).get(
-                                    "weak_or_nonsemantic_steps", []
-                                )
-                                + old.get("trajectory_semantics", {}).get(
-                                    "possible_incidental_steps", []
-                                )
-                            )
-                        ],
-                        "retrieval_text": {
-                            "summary": old.get("retrieval_text", {}).get(
-                                "expanded_retrieval_summary",
-                                old.get("retrieval_text", {}).get(
-                                    "short_retrieval_summary", ""
-                                ),
-                            ),
-                            "keywords": old.get("retrieval_text", {}).get("keywords", []),
-                        },
-                        "remaining_ambiguity": old.get("target_disambiguation", {}).get(
-                            "what_remains_ambiguous", []
-                        ),
-                    }
-                else:
-                    output["path_conditioned_target_memory"] = {}
-
-            memory = output.setdefault("path_conditioned_target_memory", {})
-
-            memory.setdefault("trajectory_id", trajectory.get("trajectory_id", ""))
-            memory.setdefault("root_node_id", trajectory.get("root_node_id", ""))
-            memory.setdefault("target_node_id", trajectory.get("target_node_id", ""))
-            memory.setdefault(
-                "path_length",
-                trajectory.get(
-                    "path_length",
-                    max(0, len(trajectory.get("node_sequence", [])) - 1),
-                ),
+        if isinstance(response_content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in response_content
+                if isinstance(item, dict)
             )
+        else:
+            text = response_content
 
-            memory.setdefault("target_tag", "")
-            memory.setdefault("path_summary", "")
-            memory.setdefault("conditioned_target_summary", "")
-            memory.setdefault("conditioned_target_purpose", "")
-            memory.setdefault("target_entity_or_scope", "")
-            memory.setdefault("screen_type", "unknown")
+        text = text.strip()
 
-            memory.setdefault("supported_user_intents", [])
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
 
-            assessment = memory.setdefault("trajectory_assessment", {})
-            assessment.setdefault("trajectory_role", "ambiguous")
-            assessment.setdefault("should_contribute_to_target_memory", True)
-            assessment.setdefault("memory_weight", 0.5)
-            assessment.setdefault("reason", "")
+        return json.loads(text)
 
-            memory.setdefault("important_steps", [])
-            memory.setdefault("weak_or_incidental_steps", [])
 
-            retrieval = memory.setdefault("retrieval_text", {})
-            retrieval.setdefault("summary", "")
-            retrieval.setdefault("keywords", [])
-
-            memory.setdefault("remaining_ambiguity", [])
-
-            return output
-
-        def clean_output(output):
-            memory = output.get("path_conditioned_target_memory", {})
-
-            placeholder_strings = {
-                "none",
-                "none.",
-                "n/a",
-                "not applicable",
-                "not applicable.",
-                "no ambiguity",
-                "no ambiguity.",
-                "none significant",
-                "none significant.",
-            }
-
-            def clean_list(values):
-                if not isinstance(values, list):
-                    return []
-
-                cleaned = []
-                for value in values:
-                    if isinstance(value, str):
-                        normalized = value.strip().lower()
-                        if normalized in placeholder_strings:
-                            continue
-                        if normalized.startswith("none significant"):
-                            continue
-                    cleaned.append(value)
-
-                return cleaned
-
-            def remove_internal_metadata(text):
-                if not isinstance(text, str):
-                    return text
-
-                text = re.sub(r"\s*\(order_index\s*:\s*\d+\)", "", text)
-                text = re.sub(r"\s*\[order_index\s*:\s*\d+\]", "", text)
-                text = re.sub(r"\s*\(boundingBox\s*:\s*\[[^\]]+\]\)", "", text)
-                text = re.sub(r"\s*\[boundingBox\s*:\s*\[[^\]]+\]\]", "", text)
-                return text.strip()
-
-            # Clamp memory weight.
-            assessment = memory.get("trajectory_assessment", {})
-            try:
-                weight = float(assessment.get("memory_weight", 0.5))
-                assessment["memory_weight"] = max(0.0, min(1.0, weight))
-            except Exception:
-                assessment["memory_weight"] = 0.5
-
-            # Normalize boolean if model returns string.
-            val = assessment.get("should_contribute_to_target_memory", True)
-            if isinstance(val, str):
-                assessment["should_contribute_to_target_memory"] = (
-                    val.strip().lower() in {"true", "yes", "1"}
-                )
-
-            # Clean text fields.
-            for key in [
-                "target_tag",
-                "path_summary",
-                "conditioned_target_summary",
-                "conditioned_target_purpose",
-                "target_entity_or_scope",
-                "screen_type",
-            ]:
-                memory[key] = remove_internal_metadata(memory.get(key, ""))
-
-            # Clean intents.
-            cleaned_intents = []
-            for item in memory.get("supported_user_intents", []):
-                if not isinstance(item, dict):
-                    continue
-
-                item["intent"] = remove_internal_metadata(item.get("intent", ""))
-                item.setdefault("intent_type", "unknown")
-
-                try:
-                    item["confidence"] = max(0.0, min(1.0, float(item.get("confidence", 0.0))))
-                except Exception:
-                    item["confidence"] = 0.0
-
-                if item["intent"]:
-                    cleaned_intents.append(item)
-
-            memory["supported_user_intents"] = cleaned_intents
-
-            # Clean steps.
-            for step_key in ["important_steps", "weak_or_incidental_steps"]:
-                cleaned_steps = []
-                for step in memory.get(step_key, []):
-                    if not isinstance(step, dict):
-                        continue
-                    step.setdefault("step_index", 0)
-                    if "meaning" in step:
-                        step["meaning"] = remove_internal_metadata(step.get("meaning", ""))
-                    if "reason" in step:
-                        step["reason"] = remove_internal_metadata(step.get("reason", ""))
-                    cleaned_steps.append(step)
-                memory[step_key] = cleaned_steps
-
-            # Clean retrieval text.
-            retrieval = memory.get("retrieval_text", {})
-            retrieval["summary"] = remove_internal_metadata(retrieval.get("summary", ""))
-            retrieval["keywords"] = clean_list(retrieval.get("keywords", []))
-
-            memory["remaining_ambiguity"] = clean_list(memory.get("remaining_ambiguity", []))
-
-            return output
-
-        if not trajectory:
-            raise ValueError("trajectory is empty or None")
-
-        if not trajectory.get("target_node_id"):
-            raise ValueError("trajectory must contain target_node_id")
-
-        if "path_steps" not in trajectory:
-            raise ValueError("trajectory must contain path_steps")
-
-        node_sequence = trajectory.get("node_sequence", [])
-        path_length = trajectory.get("path_length", max(0, len(node_sequence) - 1))
-
-        trajectory_for_prompt = {
-            "trajectory_id": trajectory.get(
-                "trajectory_id",
-                f"{trajectory.get('target_node_id', '')}::path",
-            ),
-            "root_node_id": trajectory.get("root_node_id", ""),
-            "target_node_id": trajectory.get("target_node_id", ""),
-            "node_sequence": node_sequence,
-            "path_length": path_length,
-
-            # Include this if you added loop/repetition analysis earlier.
-            "trajectory_structure": trajectory.get("trajectory_structure", {}),
-
-            "root_node_summary": trajectory.get("root_node_summary", {}),
-            "target_node_summary": trajectory.get("target_node_summary", {}),
-
-            # Full final target node information only once.
-            "target_node_information": trajectory.get("target_node_information", {}),
-
-            # Path steps are already compact.
-            "path_steps": trajectory.get("path_steps", []),
-        }
-
+    def get_path_intents(self, trajectory):
         system_prompt = """
-    You are a mobile UI path-conditioned target memory module.
+        You analyze one mobile UI navigation path.
 
-    You are given one trajectory from a root node to a final target node.
+        The input is an alternating sequence:
+        [page description, transition actions, page description, transition actions, page description, ...]
 
-    The input includes:
-    - full node-level information for the final target node
-    - compact root/target summaries
-    - compact path steps
-    - transition information for each step
-    - candidate executable action signatures for each step
-    - optional trajectory_structure describing loops, repeated nodes, repeated edges, or backtracking
+        Your task has only two outputs:
+        1. path_user_goals: what user goal(s) this path supports.
+        2. path_reliability: how general, stable, and useful this path is.
 
-    Your task is to create compact path-conditioned memory for the final target node.
+        Rules for path_user_goals:
+        - Write concise user-facing goals.
+        - Goals should describe why a user would follow this path.
+        - Example: "Navigate to Messenger", "Open the message filter overlay", "Reach the search page".
+        - Do not mention node ids, edge ids, screenshots, or metadata.
 
-    Do not produce a long debug report.
-    Do not generate the final executable navigation plan.
-    Do not choose the globally best route.
-    Do not merge this trajectory with other trajectories.
-    Do not reject strange trajectories automatically; classify their semantic role.
+        Rules for reliability score:
+        - Score must be an integer from 0 to 5.
+        - 5 = direct, stable, general path aligned with the final page.
+        - 4 = good path with minor extra steps.
+        - 3 = usable but indirect or somewhat specific.
+        - 2 = weak path with unnecessary detours or dynamic/specific actions.
+        - 1 = poor path with loops, unrelated steps, or unstable/personal/dynamic content.
+        - 0 = invalid or not useful.
 
-    The output will be stored for retrieval and later route distillation.
+        Penalize:
+        - loops or back-and-forth navigation
+        - repeated switching between sections
+        - actions based on personal names, product names, prices, timestamps, badges, or temporary content
+        - actions not aligned with the final page
+        - unnecessary intermediate pages
 
-    Preserve only:
-    - conditioned meaning of the target
-    - user intents/goals supported by the target
-    - trajectory assessment and memory weight
-    - important steps versus weak/incidental steps
-    - compact retrieval text
-
-    Return JSON only using the requested schema. Do not add extra fields.
-    """.strip()
+        Return JSON only. Do not add extra fields.
+        """.strip()
 
         user_prompt = f"""
-    Trajectory input:
-    {normalize_json_like(trajectory_for_prompt)}
+        Trajectory:
+        {json.dumps(trajectory, ensure_ascii=False, indent=2)}
 
-    Return JSON with exactly this compact schema:
+        Return exactly this JSON schema:
 
-    {{
-    "path_conditioned_target_memory": {{
-        "trajectory_id": "copy from input",
-        "root_node_id": "copy from input",
-        "target_node_id": "copy from input",
-        "path_length": 0,
-
-        "target_tag": "short target name, max 6 words",
-        "path_summary": "one concise sentence describing the route context",
-        "conditioned_target_summary": "one or two sentences interpreting the target using this path",
-        "conditioned_target_purpose": "what the target page supports",
-        "target_entity_or_scope": "specific feature, section, account, setting, item, or category represented by the target",
-        "screen_type": "profile | settings | feed | list | detail | editor | search | modal | tab | store | keyboard_surface | external_surface | unknown",
-
-        "supported_user_intents": [
         {{
-            "intent": "short user-facing goal this target can satisfy",
-            "intent_type": "navigate_to_section | view_information | edit_information | configure_setting | search_or_filter | create_content | manage_account | inspect_item | browse_store | use_tool | recover_or_reset | unknown",
-            "confidence": 0.0
-        }}
+        "path_user_goals": [
+            "concise user goal"
         ],
-
-        "trajectory_assessment": {{
-        "trajectory_role": "target_disambiguating | valid_alternative | valid_but_redundant | weak_nonsemantic | recovery_only | likely_incidental | node_only | ambiguous",
-        "should_contribute_to_target_memory": true,
-        "memory_weight": 0.0,
-        "reason": "one concise reason"
-        }},
-
-        "important_steps": [
-        {{
-            "step_index": 0,
-            "meaning": "why this step matters for interpreting or reaching the target"
+        "path_reliability": {{
+            "score": 0,
+            "reason": "brief reason"
         }}
-        ],
-
-        "weak_or_incidental_steps": [
-        {{
-            "step_index": 0,
-            "reason": "why this step is weak, redundant, incidental, cross-surface, or unrelated"
         }}
-        ],
-
-        "retrieval_text": {{
-        "summary": "compact retrieval text containing target purpose, route context, and main intents",
-        "keywords": [
-            "important retrieval terms"
-        ]
-        }},
-
-        "remaining_ambiguity": [
-        "only real unresolved ambiguity; empty list if none"
-        ]
-    }}
-    }}
-
-    Guidelines:
-    - Be concise.
-    - Do not include long evidence lists.
-    - Generate intents only for the final target node.
-    - User intents must be path-conditioned, not generic.
-    - Mark only the semantically important steps in important_steps.
-    - Mark noisy, redundant, refresh-like, loop-like, keyboard-surface, external-surface, or unrelated steps in weak_or_incidental_steps.
-    - Use trajectory_structure, if present, to identify loops or repeated-node behavior.
-    - Do not automatically reject a path with loops or incidental steps; classify it.
-    - trajectory_assessment.memory_weight:
-    - 0.8 to 1.0 = strong target-disambiguating route
-    - 0.5 to 0.8 = valid alternative with some noise
-    - 0.2 to 0.5 = weak/redundant route
-    - 0.0 to 0.2 = likely incidental route
-    - Use should_contribute_to_target_memory=false only if the trajectory is likely incidental or not useful for target interpretation.
-    - retrieval_text.summary should be optimized for semantic retrieval.
-    - Return valid JSON only.
-    """.strip()
+        """.strip()
 
         messages = [
-            {
-                "role": "system",
-                "content": [{"text": system_prompt}],
-            },
-            {
-                "role": "user",
-                "content": [{"text": user_prompt}],
-            },
+            {"role": "system", "content": [{"text": system_prompt}]},
+            {"role": "user", "content": [{"text": user_prompt}]},
         ]
 
-        if hasattr(self, "_post_process_model_for_path_conditioned_goals"):
-            model_name = self._post_process_model_for_path_conditioned_goals()
-        elif hasattr(self, "_post_process_model_for_transition_info"):
-            model_name = self._post_process_model_for_transition_info()
-        elif hasattr(self, "_post_process_model_for_node_level_information"):
-            model_name = self._post_process_model_for_node_level_information()
-        else:
-            model_name = self._post_process_model_for_node_intents()
-
         response = dashscope.MultiModalConversation.call(
-            model=model_name,
+            model=self.configs.post_process.vlm_model_name_for_path_intents,
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.0,
@@ -3248,23 +1595,372 @@ class VLM:
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Path-conditioned-goals call failed: "
-                f"status_code={response.status_code} "
-                f"code={getattr(response, 'code', None)} "
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
                 f"message={getattr(response, 'message', None)}"
             )
 
-        text = extract_response_text(response)
+        content = response.output.choices[0].message.content
 
-        try:
-            output = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                "Failed to parse path-conditioned-goals response as JSON.\n"
-                f"Raw response:\n{text}"
-            ) from exc
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        else:
+            text = content
 
-        output = ensure_schema(output, trajectory_for_prompt)
-        output = clean_output(output)
+        text = text.strip()
 
-        return output
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
+
+        result = json.loads(text)
+
+        score = int(result.get("path_reliability", {}).get("score", 0))
+        score = max(0, min(5, score))
+
+        return {
+            "path_user_goals": result.get("path_user_goals", []),
+            "path_reliability": {
+                "score": score,
+                "reason": result.get("path_reliability", {}).get("reason", ""),
+            },
+        }
+
+
+    def get_top_paths(self, path_intents, k=3):
+        """
+        Input:
+            path_intents = {
+                "0": {
+                    "path_user_goals": [...],
+                    "path_reliability": {"score": 5, "reason": "..."},
+                    "node_sequence": [...]
+                },
+                ...
+            }
+
+        Output:
+            ["0", "2", "5"]
+        """
+
+        import json
+        import dashscope
+
+        if not path_intents:
+            return []
+
+        k = max(1, int(k))
+
+        candidates = sorted(
+            path_intents.items(),
+            key=lambda x: x[1].get("path_reliability", {}).get("score", 0),
+            reverse=True,
+        )[: max(8, k * 4)]
+
+        compact_candidates = {
+            path_id: {
+                "path_user_goals": data.get("path_user_goals", []),
+                "score": data.get("path_reliability", {}).get("score", 0),
+                "reason": data.get("path_reliability", {}).get("reason", ""),
+                "node_sequence": data.get("node_sequence", []),
+            }
+            for path_id, data in candidates
+        }
+
+        system_prompt = """
+    You select the best navigation paths for one target node.
+
+    Select at least 1 and at most k path ids.
+
+    Prefer:
+    - higher reliability score
+    - direct and stable paths
+    - semantically different user goals
+    - different route/node sequences
+    - general reusable paths
+
+    Avoid:
+    - duplicate or near-duplicate paths
+    - paths that only differ by scrolling
+    - loops or back-and-forth navigation
+    - paths relying on dynamic, personal, product-specific, price-specific, timestamp, badge, or temporary content
+
+    Return JSON only. Do not add extra fields.
+    """.strip()
+
+        user_prompt = f"""
+    k:
+    {k}
+
+    Candidate paths:
+    {json.dumps(compact_candidates, ensure_ascii=False, indent=2)}
+
+    Return exactly:
+
+    {{
+    "selected_path_ids": [
+        "path id"
+    ]
+    }}
+    """.strip()
+
+        response = dashscope.MultiModalConversation.call(
+            model="qwen3.5-flash",
+            messages=[
+                {"role": "system", "content": [{"text": system_prompt}]},
+                {"role": "user", "content": [{"text": user_prompt}]},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
+                f"message={getattr(response, 'message', None)}"
+            )
+
+        content = response.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        else:
+            text = content
+
+        text = text.strip()
+
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
+
+        selected = json.loads(text).get("selected_path_ids", [])
+
+        valid_ids = set(path_intents.keys())
+        selected = [str(x) for x in selected if str(x) in valid_ids][:k]
+
+        if not selected:
+            selected = [candidates[0][0]]
+
+        return selected
+
+
+    def get_node_user_intents(self, node_info, path_intents, out_edges):
+        """
+        Output:
+            {
+                "user_intents": [...]
+            }
+        """
+
+        system_prompt = """
+        You generate natural-language user intents for one mobile UI screen.
+
+        Inputs:
+        - node_info: description of the current screen
+        - path_intents: goals of paths that reached this screen
+        - out_edges: visible actions that lead to other screens/states
+
+        Task:
+        Generate possible user intents for the CURRENT screen only.
+
+        Intent style:
+        - Write intents like what a user would say to a navigation agent.
+        - Use natural commands such as:
+        - "Navigate to the page where I can filter messages"
+        - "Go to the Messenger filter page"
+        - "Open the page where I can search messages or suppliers"
+        - "Navigate to Messenger and open message filters"
+        - "Go to the page where I can apply conversation filters"
+
+        Rules:
+        - Include different abstraction levels:
+        - broad page intent
+        - section/subsection intent
+        - specific current-screen capability
+        - Do not write short labels like "Message filtering" or "Custom labels".
+        - Do not include goals that belong to out_edges.
+        - If an action appears in out_edges, assume its destination goal belongs to another screen/state, not this screen.
+        - Do not include dynamic, personal, product-specific, price-specific, badge-specific, timestamp-specific, or temporary details.
+        - Keep each intent concise and user-facing.
+        - Return JSON only. Do not add extra fields.
+        """.strip()
+
+        user_prompt = f"""
+        Node info:
+        {json.dumps(node_info, ensure_ascii=False, indent=2)}
+
+        Path intents:
+        {json.dumps(path_intents, ensure_ascii=False, indent=2)}
+
+        Out edges:
+        {json.dumps(out_edges, ensure_ascii=False, indent=2)}
+
+        Return exactly:
+
+        {{
+        "user_intents": [
+            "natural-language user command"
+        ]
+        }}
+
+        Good examples:
+        - "Navigate to the page where I can filter messages"
+        - "Go to the Messenger filter overlay"
+        - "Navigate to Messenger and open conversation filters"
+        - "Open the page where I can search messages or suppliers"
+        - "Go to the page where I can clear or apply message filters"
+
+        Bad examples:
+        - "Message filtering"
+        - "Unread filter"
+        - "Manage labels"
+        - "Lena Lu messages"
+        - "Unread 19"
+        """.strip()
+
+        response = dashscope.MultiModalConversation.call(
+            model=self.configs.post_process.vlm_model_name_for_node_user_intents,
+            messages=[
+                {"role": "system", "content": [{"text": system_prompt}]},
+                {"role": "user", "content": [{"text": user_prompt}]},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
+                f"message={getattr(response, 'message', None)}"
+            )
+
+        content = response.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        else:
+            text = content
+
+        text = text.strip()
+
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
+
+        result = json.loads(text)
+
+        return {
+            "user_intents": result.get("user_intents", [])
+        }
+
+    
+    def get_navigation_plan(self, navigation_input):
+
+        system_prompt = """
+    You generate compact mobile UI navigation plans.
+
+    Input contains:
+    - target_page
+    - paths
+    - each path has ordered pages and ordered actions between pages
+
+    Task:
+    Create one navigation plan for each path.
+
+    Each plan must contain:
+    - relevant_waypoint_sequence: semantic page/state names the agent lands on
+    - transition_hints: ordered action instructions needed to reach the target
+
+    Rules:
+    - Do not generate user intents.
+    - Do not include node ids, edge ids, coordinates, screenshots, scores, or reasons.
+    - Use page descriptions to name waypoints.
+    - Use action descriptions to write transition hints.
+    - transition_hints must preserve every action in order.
+    - Use low_level_action_description for grounding hints.
+    - Use high_level_action_description only to simplify/generalize the action.
+    - Remove duplicate consecutive waypoints.
+    - Do not include app launch, phone home screen, or OS-level states.
+    - Do not include actions after reaching the target page.
+    - Return JSON only. Do not add extra fields.
+    """.strip()
+
+        user_prompt = f"""
+    Navigation input:
+    {json.dumps(navigation_input, ensure_ascii=False, indent=2)}
+
+    Return exactly:
+
+    {{
+    "ui_navigation_memory": [
+        {{
+        "relevant_waypoint_sequence": [
+            "semantic waypoint name"
+        ],
+        "transition_hints": [
+            "ordered navigation action hint"
+        ]
+        }}
+    ]
+    }}
+    """.strip()
+
+        response = dashscope.MultiModalConversation.call(
+            model=self.configs.post_process.vlm_model_name_for_navigation_plan,
+            messages=[
+                {"role": "system", "content": [{"text": system_prompt}]},
+                {"role": "user", "content": [{"text": user_prompt}]},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.0,
+            seed=42,
+            top_p=0.9,
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
+                f"message={getattr(response, 'message', None)}"
+            )
+
+        content = response.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        else:
+            text = content
+
+        text = text.strip()
+
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
+
+        return json.loads(text)
