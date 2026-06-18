@@ -89,98 +89,87 @@ class VLM:
         candidates,
         top_k=3,
     ):
-        top_k = min(top_k, len(candidates))
+        import json
+        from dashscope import MultiModalConversation
 
-        system_msg = {
-            "role": "system",
-            "content": [
-                {
-                    "text": (
-                        "You are a strict reranking module for Android UI navigation.\n"
-                        "Your task is to select the best TARGET PAGE nodes for a user's navigation query.\n\n"
-                        "Each candidate may contain:\n"
-                        "- node_id: unique node identifier\n"
-                        "- page_tag: short page/screen label\n"
-                        "- page_purpose: what the page/screen itself is mainly for\n"
-                        "- screen_type: page type such as settings_list, list_page, modal_menu, dialog, overlay, detail_page\n"
-                        "- selected_navigation: current selected section if available\n"
-                        "- depth: navigation depth from root; lower means easier to reach\n"
-                        "- score: embedding similarity score between the query and the node\n"
-                        "- user_intents: possible user goals directly supported by this node\n\n"
-                        "Ranking rules:\n"
-                        "1. Select the node whose page itself directly satisfies the user query.\n"
-                        "2. Prefer page_tag and page_purpose matches over path/menu/waypoint matches.\n"
-                        "3. If the query asks for a settings page, prefer candidates with screen_type='settings_list' or page_tag/page_purpose containing that settings destination.\n"
-                        "4. Penalize modal_menu, dialog, popup, overlay, and temporary menu screens unless the query explicitly asks to open a menu, dialog, popup, or overflow options.\n"
-                        "5. Do not select a menu merely because it contains a menu item that can lead to the desired page. Select the destination page if it is available.\n"
-                        "6. Match the specificity of the query: broad query -> broad parent page; specific query -> specific target page.\n"
-                        "7. Relevance and target-page correctness are more important than depth or embedding score.\n"
-                        "8. Use depth only as a tie-breaker when relevance is similar.\n"
-                        "9. Only select node_ids from the provided candidates.\n\n"
-                        "Examples:\n"
-                        "- For 'navigate to notifications settings page', prefer 'Notifications Settings' with screen_type='settings_list' over 'Notifications Menu' with screen_type='modal_menu'.\n"
-                        "- For 'open notifications overflow menu', prefer 'Notifications Menu'.\n"
-                        "- For 'go to settings', prefer the main Settings page over specific sub-settings.\n"
-                        "- For 'change caption style', prefer the Caption preference/settings page over generic Settings.\n\n"
-                        "You must output valid JSON only."
-                    )
-                }
-            ],
-        }
+        if not candidates:
+            return [], {"top_k_node_ids": [], "reasoning": {}}
+
+        top_k = min(top_k, len(candidates))
 
         compact_candidates = []
 
         for c in candidates:
-            compact_candidates.append(
-                {
-                    "node_id": c.get("node_id"),
-                    "page_tag": c.get("page_tag", ""),
-                    "page_purpose": c.get("page_purpose", ""),
-                    "screen_type": c.get("screen_type", ""),
-                    "selected_navigation": c.get("selected_navigation", ""),
-                    "depth": c.get("depth"),
-                    "score": c.get("score"),
-                    "user_intents": c.get("user_intents", []),
-                }
-            )
-        prompt = (
-            "User query:\n"
-            f"{user_query}\n\n"
-            "Target-page guidance:\n"
-            "- Select the page that directly satisfies the user goal.\n"
-            "- Do not select an intermediate menu, overflow menu, dialog, or overlay if the actual destination page is available.\n"
-            "- For a query asking for a settings page, prefer an actual settings page/list over a menu containing a Settings item.\n"
-            "- For a broad query, select the broadest directly matching page.\n"
-            "- For a specific query, select the most specific page that directly satisfies the requested goal.\n\n"
-            f"Select exactly {top_k} best candidate nodes.\n\n"
-            "Candidate nodes:\n"
-            f"{json.dumps(compact_candidates, indent=2, ensure_ascii=False)}\n\n"
-            "Return JSON in exactly this format:\n"
-            "{\n"
-            '  "top_k_node_ids": ["node_id_1", "node_id_2"],\n'
-            '  "reasoning": {\n'
-            '    "node_id_1": "brief reason",\n'
-            '    "node_id_2": "brief reason"\n'
-            "  }\n"
-            "}\n\n"
-            f"The list top_k_node_ids must contain exactly {top_k} node_ids.\n"
-            "Only use node_ids that appear in the provided candidates.\n"
-            "Do not include markdown or extra text."
-        )
+            page_description = c.get("page_description", {}) or {}
 
-        user_msg = {
-            "role": "user",
-            "content": [
-                {"text": prompt},
-            ],
-        }
+            compact_candidates.append({
+                "node_id": c.get("node_id"),
+                "retrieval_score": c.get("retrieval_score", 0.0),
+                "page_description": {
+                    "high_level": page_description.get("high_level", ""),
+                    "medium_level": page_description.get("medium_level", ""),
+                    "low_level": page_description.get("low_level", ""),
+                },
+                "user_intents": c.get("user_intents", []),
+                "ui_navigation_memory": c.get("ui_navigation_memory", []),
+            })
 
-        messages = [system_msg, user_msg]
-        self.prompt = messages
+        system_prompt = """
+    You are a strict reranker for mobile UI navigation.
 
-        resp = MultiModalConversation.call(
+    You are given:
+    - user query
+    - candidate target nodes
+    - each candidate has page_description, user_intents, retrieval_score, and ui_navigation_memory
+
+    Select the best target node ids.
+
+    Ranking rules:
+    - Prefer candidates whose user_intents directly match the user query.
+    - Use page_description to resolve ambiguity.
+    - ui_navigation_memory is only route evidence, not main relevance evidence.
+    - retrieval_score is only a tie-breaker.
+    - Prefer the actual destination page/state, not an intermediate page that only leads there.
+    - If the query asks for a specific page, choose the most specific matching page.
+    - If the query asks for search history, choose search history, not recommendation/history feed.
+    - If the query asks for invoice or receipt history, choose invoices/receipts, not generic history.
+    - If the query asks for settings, choose actual settings/account configuration.
+    - If the query asks for filters or labels, choose the filter/label surface.
+    - Penalize candidates that match words but not the actual user intent.
+    - Penalize overlays/modals unless the query asks for that overlay or its direct function.
+    - Only select node_ids from candidates.
+    - Return JSON only.
+    """.strip()
+
+        user_prompt = f"""
+    User query:
+    {user_query}
+
+    Candidates:
+    {json.dumps(compact_candidates, ensure_ascii=False, indent=2)}
+
+    Select exactly {top_k} best candidate nodes.
+
+    Return exactly:
+
+    {{
+    "top_k_node_ids": [
+        "node_id"
+    ],
+    "reasoning": {{
+        "node_id": "brief reason"
+    }}
+    }}
+
+    Do not include markdown or extra text.
+    """.strip()
+
+        response = MultiModalConversation.call(
             model="qwen3.6-plus",
-            messages=messages,
+            messages=[
+                {"role": "system", "content": [{"text": system_prompt}]},
+                {"role": "user", "content": [{"text": user_prompt}]},
+            ],
             response_format={"type": "json_object"},
             enable_thinking=False,
             temperature=0.0,
@@ -188,7 +177,68 @@ class VLM:
             seed=42,
         )
 
-        text = resp.output.choices[0].message.content[0]["text"]
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"VLM call failed: status_code={response.status_code}, "
+                f"code={getattr(response, 'code', None)}, "
+                f"message={getattr(response, 'message', None)}"
+            )
+
+        content = response.output.choices[0].message.content
+
+        if isinstance(content, list):
+            text = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict)
+            )
+        else:
+            text = content
+
+        text = text.strip()
+
+        if text.startswith("```json"):
+            text = text.removeprefix("```json").removesuffix("```").strip()
+        elif text.startswith("```"):
+            text = text.removeprefix("```").removesuffix("```").strip()
+
         result = json.loads(text)
+
+        valid_ids = {
+            c["node_id"]
+            for c in compact_candidates
+            if c.get("node_id")
+        }
+
+        selected = []
+
+        for node_id in result.get("top_k_node_ids", []):
+            if node_id in valid_ids and node_id not in selected:
+                selected.append(node_id)
+
+        if len(selected) < top_k:
+            for c in compact_candidates:
+                node_id = c.get("node_id")
+                if node_id in valid_ids and node_id not in selected:
+                    selected.append(node_id)
+
+                if len(selected) >= top_k:
+                    break
+
+        selected = selected[:top_k]
+
+        reasoning = result.get("reasoning", {})
+        if not isinstance(reasoning, dict):
+            reasoning = {}
+
+        result = {
+            "top_k_node_ids": selected,
+            "reasoning": {
+                node_id: str(
+                    reasoning.get(node_id, "Selected by reranker.")
+                ).strip()
+                for node_id in selected
+            },
+        }
 
         return result["top_k_node_ids"], result

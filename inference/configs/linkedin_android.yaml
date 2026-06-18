@@ -8,7 +8,7 @@ default:
     description: "The LinkedIn app is designed to connect professionals, enabling them to network, share insights, and explore career opportunities."
 
   driver:
-    device_id: "emulator-5554"
+    device_id: "R3CX20L5N6F"
     os_name: "android"
     appPackage: "com.linkedin.android"
     appActivity: ".authenticator.LaunchActivityDefault"

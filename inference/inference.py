@@ -10,6 +10,7 @@ from Agents.factory import build_agent
 import json
 from networkx.readwrite import json_graph
 import os
+import re
 import cv2
 import time
 import argparse
@@ -71,6 +72,73 @@ def retrieve_nodes_from_user_intents_embeddings(
     return results
 
 
+def build_rerank_candidates(
+    task_prompt,
+    results,
+    node_information,
+    node_intents,
+    node_navigation_plans,
+):
+    candidates = []
+
+    for result in results:
+        node_id = result["node_id"]
+
+        node_info = node_information.get(node_id, {}) or {}
+        intent_info = node_intents.get(node_id, {}) or {}
+        nav_info = node_navigation_plans.get(node_id)
+        ui_navigation_memory = normalize_ui_navigation_memory(nav_info)
+
+        user_intents = (
+            result.get("user_intents")
+            or intent_info.get("user_intents")
+            or []
+        )
+
+        if isinstance(user_intents, dict):
+            user_intents = user_intents.get("user_intents", [])
+
+        candidates.append({
+            "node_id": node_id,
+            "retrieval_score": result.get("score", 0.0),
+            "page_description": {
+                "high_level": node_info.get("high_level", ""),
+                "medium_level": node_info.get("medium_level", ""),
+                "low_level": node_info.get("low_level", ""),
+            },
+            "user_intents": user_intents,
+            "ui_navigation_memory": ui_navigation_memory,
+        })
+
+    return {
+        "task_prompt": task_prompt,
+        "candidates": candidates,
+    }
+
+def normalize_ui_navigation_memory(nav_entry) -> list:
+    """
+    node_navigation_plans.json stores each node as a list of plans:
+
+    {
+        "node_id": [
+            {
+                "relevant_waypoint_sequence": [...],
+                "transition_hints": [...]
+            }
+        ]
+    }
+    """
+    if nav_entry is None:
+        return []
+    if isinstance(nav_entry, list):
+        return nav_entry
+    if isinstance(nav_entry, dict):
+        memory = nav_entry.get("ui_navigation_memory")
+        if isinstance(memory, list):
+            return memory
+    return []
+
+
 def load_node_navigation_plans(logs_root: str) -> dict:
     """Load per-node navigation plans from node_navigation_plans.json."""
     path = os.path.join(logs_root, "node_navigation_plans.json")
@@ -82,26 +150,11 @@ def load_node_navigation_plans(logs_root: str) -> dict:
 
 
 def get_ui_navigation_memory_for_node(node_navigation_plans: dict, node_id: str) -> list:
-    nav_entry = node_navigation_plans.get(node_id, {})
-    if isinstance(nav_entry, dict):
-        return nav_entry.get("ui_navigation_memory", []) or []
-    return []
+    return normalize_ui_navigation_memory(node_navigation_plans.get(node_id))
 
 
 def build_retrieval_query(user_goal: str) -> str:
-    user_goal = user_goal.strip()
-
-    return f"""
-PAGE_TAG:
-{user_goal}
-
-PAGE_PURPOSE:
-{user_goal}
-
-USER_INTENTS:
-{user_goal}
-""".strip()
-
+    return str(user_goal or "").strip()
 
 def get_node_depths(G):
     """
@@ -293,7 +346,7 @@ def get_task_prompts_dict_from_directory(input_dir):
     return task_prompts
 
 
-def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg):
+def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg):
 
     if configs.use_memory_for_navigation:
         results = retrieve_nodes_from_user_intents_embeddings(
@@ -303,39 +356,56 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
             top_k=configs.top_k_in_first_stage_retrieval,
         )
 
-        for result in results:
-            node_id = result["node_id"]
-            img = cv2.imread(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg"))
-            cv2.imshow('out', cv2.resize(img, None, fx=0.5, fy=0.5))
-            cv2.waitKey(0)
-            print(result)
+
+        # for result in results:
+        #     node_id = result["node_id"]
+        #     img = cv2.imread(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg"))
+        #     cv2.imshow('out', cv2.resize(img, None, fx=0.5, fy=0.5))
+        #     cv2.waitKey(0)
+        #     print(result)
+
+
+        rerank_payload = build_rerank_candidates(
+            task_prompt,
+            results,
+            node_level_information,
+            node_intents,
+            node_navigation_plans,
+        )
+        candidates = rerank_payload["candidates"]
+
+        top_k_node_ids, rerank_result = vlm_client.rerank_candidates(
+            task_prompt,
+            candidates,
+            top_k=configs.top_k_retrieval_in_stage_2,
+        )
         
-        candidates = []
-        for result in results:
-            node_id = result["node_id"]
-            node_entry = node_intents.get(node_id, {})
-            summary = node_entry.get("enhanced_page_summary", {}) or {}
 
-            candidates.append(
-                {
-                    "node_id": node_id,
-                    "page_tag": summary.get("tag", ""),
-                    "page_purpose": summary.get("page_purpose", ""),
-                    "screen_type": summary.get("screen_type", ""),
-                    "selected_navigation": summary.get("selected_navigation", ""),
-                    "depth": depths.get(node_id),
-                    "score": result.get("score"),
-                    "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
-                }
-            )
-
-        top_k_node_ids, result = vlm_client.rerank_candidates(task_prompt, candidates, top_k=configs.top_k_retrieval_in_stage_2)
         candidates = [c for c in candidates if c["node_id"] in top_k_node_ids]
+        candidates = [
+            {
+                **c,
+                "score": c.get("retrieval_score", c.get("score", 0.0)),
+                "depth": depths.get(c["node_id"], 0),
+                "page_purpose": (
+                    c.get("page_description", {}).get("high_level", "")
+                    or c.get("page_description", {}).get("medium_level", "")
+                ),
+            }
+            for c in candidates
+        ]
+
+
 
         pick_candidate_index = getattr(configs, "pick_candidate_index", -1)
         print(f"pick_candidate_index: {pick_candidate_index}")
         if pick_candidate_index == -1:
-            selected_node_id = pick_candidate(candidates, os.path.join(configs.logs.root, "screenshots"), user_query=task_prompt, vlm_reasoning=result)
+            selected_node_id = pick_candidate(
+                candidates,
+                os.path.join(configs.logs.root, "screenshots"),
+                user_query=task_prompt,
+                vlm_reasoning=rerank_result.get("reasoning"),
+            )
         else:
             if not candidates:
                 raise ValueError("No candidates available to pick.")
@@ -346,6 +416,7 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
         navigation_memory = get_ui_navigation_memory_for_node(node_navigation_plans, selected_node_id)
     else:
         navigation_memory = []
+        selected_node_id = None
 
     navigation_memory = format_navigation_plan(navigation_memory, task_prompt)
 
@@ -461,7 +532,7 @@ if __name__ == "__main__":
         data = json.load(f)
     graph = json_graph.node_link_graph(data, edges="links")
     depths = get_node_depths(graph)
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
+    with open(os.path.join(configs.logs.root, "user_intents.json"), "r", encoding="utf-8") as f:
         node_intents = json.load(f)
     node_navigation_plans = load_node_navigation_plans(configs.logs.root)
 
@@ -471,8 +542,11 @@ if __name__ == "__main__":
     batch_mode = configs.get("batch_mode", False)
     output_dir = configs.get("output_dir", None)
 
-    with open(os.path.join(configs.logs.root, "node_intents.json"), "r", encoding="utf-8") as f:
+    with open(os.path.join(configs.logs.root, "user_intents.json"), "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    with open(os.path.join(configs.logs.root, "node_level_information.json"), "r", encoding="utf-8") as f:
+        node_level_information = json.load(f)
 
     node_ids, embeddings = zip(*[
         (node_id, item["embedding"])
@@ -489,7 +563,7 @@ if __name__ == "__main__":
 
         for task_name, task_prompt in task_prompts.items():
             os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}"), exist_ok=True)
-            screenshots, actions, finish_flag = execute_single_task(task_prompt, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
+            screenshots, actions, finish_flag = execute_single_task(task_prompt, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
             annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
             for i, screenshot in enumerate(annotated_screenshots):
                 os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "annotated_screenshots"), exist_ok=True)
@@ -507,7 +581,7 @@ if __name__ == "__main__":
         else:
             user_query = input("Enter your query: ")
 
-        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
+        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
         annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)

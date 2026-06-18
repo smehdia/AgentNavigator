@@ -2,7 +2,7 @@
 
 Run a natural-language navigation goal on a **physical device** using an explored app graph. Inference retrieves the best target screen from exploration artifacts, optionally lets you confirm the pick in a Gradio UI, then drives the UI agent step-by-step until the goal is reached.
 
-**Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `node_intents.json`, `node_navigation_plans.json`, and `screenshots/`.
+**Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `user_intents.json`, `node_level_information.json`, `node_navigation_plans.json`, and `screenshots/`.
 
 **Recommended for demos:** use the [Inference GUI](#inference-gui-demo-wizard) (`run_gui.sh`) — a browser wizard that walks through config, device checks, retrieval, and on-device navigation. For scripted or batch runs, use the [CLI](#quick-start-cli) (`inference.py`).
 
@@ -21,7 +21,7 @@ inference/
 ├── run_gui.sh              # Recommended launcher (build frontend + start server)
 └── gui_demo/
     ├── inference_gui.py    # FastAPI backend (REST + WebSockets + static UI)
-    ├── pipeline.py         # load_artifacts, run_retrieval, run_navigation_loop
+    ├── pipeline.py         # load_artifacts, build_rerank_candidates, run_retrieval, run_navigation_loop
     ├── requirements-gui.txt
     └── web/                # React + Vite frontend
         ├── src/            # Source (committed)
@@ -32,7 +32,7 @@ inference/
 
 | Requirement | Notes |
 |-------------|--------|
-| **Exploration artifacts** | Under `logs.root` in your config: `graph.json`, `node_intents.json`, `node_navigation_plans.json`, `screenshots/{node_id}.jpg` |
+| **Exploration artifacts** | Under `logs.root`: `graph.json`, `user_intents.json`, `node_level_information.json`, `node_navigation_plans.json`, `screenshots/{node_id}.jpg` |
 | **Python env** | Same env as CLI inference (FlagEmbedding, dynaconf, dashscope, OpenCV, etc.) |
 | **GUI extras** | `pip install -r gui_demo/requirements-gui.txt` (FastAPI, uvicorn, PyYAML) |
 | **Node.js 18+** | For `npm install` / `npm run build` in `gui_demo/web/` |
@@ -167,16 +167,17 @@ flowchart TB
 **Load resources** (`load_artifacts` in `pipeline.py`):
 
 1. `graph.json` → NetworkX graph + per-node **depth** (shortest hop from nearest root).
-2. `node_intents.json` → `user_intents`, `embedding` vectors, `enhanced_page_summary`.
-3. `node_navigation_plans.json` → per-node `ui_navigation_memory` (clustered route plans from post-process Stage 2).
-4. BGE-M3 model loaded for query encoding at retrieval time.
-5. `VLM` client for stage-2 reranking.
-6. Agent client connected to `agent.url`.
+2. `user_intents.json` → `user_intents`, `embedding`, `embedding_text` (BGE-M3 index from post-process Stage 6).
+3. `node_level_information.json` → per-node page descriptions used in VLM reranking.
+4. `node_navigation_plans.json` → per-node **list** of route plans (`relevant_waypoint_sequence`, `transition_hints`) from post-process Stage 5.
+5. BGE-M3 model loaded for query encoding at retrieval time.
+6. `VLM` client for stage-2 reranking.
+7. Agent client connected to `agent.url`.
 
 **Retrieve** (when `use_memory_for_navigation: true`):
 
-1. **Stage 1** — encode the user query with BGE-M3; cosine-search against precomputed node embeddings; keep top `top_k_in_first_stage_retrieval`.
-2. **Stage 2** — `VLM.rerank_candidates` with `page_purpose`, depth, scores, and `user_intents`; keep top `top_k_retrieval_in_stage_2`.
+1. **Stage 1** — encode the user query with BGE-M3; cosine-search against precomputed node embeddings in `user_intents.json`; keep top `top_k_in_first_stage_retrieval`.
+2. **Stage 2** — `build_rerank_candidates` enriches hits with `page_description`, `user_intents`, and navigation plans; `VLM.rerank_candidates` reranks; keep top `top_k_retrieval_in_stage_2`.
 3. Return candidate cards with exploration screenshots (`GET /api/screenshots/{node_id}`).
 
 **Navigation memory** — for the selected node, `get_ui_navigation_memory_for_node` reads plans from `node_navigation_plans.json`, then `format_navigation_plan` builds the text prompt (waypoints + transition hints) passed to the agent.
@@ -200,7 +201,7 @@ This mirrors CLI `inference.py` except candidate selection is **interactive** (t
 | `POST /api/device/connect` | Launch app on device |
 | `WS /ws/device` | Live device screenshot stream |
 | `GET /api/resources/load/stream` | SSE progress while loading artifacts |
-| `POST /api/retrieve` | Run embedding + VLM retrieval for a query |
+| `POST /api/retrieve` | Run embedding search, build rerank candidates, VLM rerank |
 | `POST /api/select-node` | Set selected target `node_id` |
 | `POST /api/navigation-memory` | Preview formatted navigation prompt |
 | `POST /api/execute/start` | Arm execution (then open execution WebSocket) |
@@ -218,7 +219,7 @@ This mirrors CLI `inference.py` except candidate selection is **interactive** (t
 | Device check fails | Run `adb devices`; set `driver.device_id` in config. |
 | Load fails on graph/intents | Verify `logs.root` and that exploration + post-process completed. |
 | Load fails on navigation plans | Ensure `node_navigation_plans.json` exists under `logs.root`. |
-| No candidate cards | Set `use_memory_for_navigation: true`; ensure `embedding` fields exist in `node_intents.json`. |
+| No candidate cards | Set `use_memory_for_navigation: true`; ensure `embedding` fields exist in `user_intents.json`. |
 | Stop does not interrupt instantly | Stop is cooperative — finishes the current agent step, then halts. |
 
 ---
@@ -359,7 +360,7 @@ If coordinates look wrong (e.g. Y lands on a different row than the described el
 
 | Field | Description |
 |-------|-------------|
-| `root` | Path to exploration output (relative to `inference/` or absolute). Must contain `graph.json`, `node_intents.json`, `node_navigation_plans.json`, and `screenshots/{node_id}.jpg`. |
+| `root` | Path to exploration output. Must contain `graph.json`, `user_intents.json`, `node_level_information.json`, `node_navigation_plans.json`, and `screenshots/{node_id}.jpg`. |
 | `resume_from_checkpoint` | Used by exploration; ignored by inference |
 
 ### Inference-specific fields
@@ -503,34 +504,34 @@ This lets you compare whether the 1st, 2nd, or 3rd VLM pick actually reaches the
 Inference splits **finding the right screen** (retrieval) from **getting there on the device** (navigation).
 
 ```mermaid
-flowchart TB
-    subgraph input [Input]
-        Q[User query]
+flowchart LR
+    Q[User query]
+    subgraph artifacts [logs.root artifacts]
+        UI[user_intents.json]
+        NL[node_level_information.json]
+        NP[node_navigation_plans.json]
         G[graph.json]
-        NI[node_intents.json]
-        SS[screenshots/]
     end
-
     subgraph retrieval [Retrieval — if use_memory_for_navigation]
         S1[Stage 1: BGE-M3 embedding search]
+        BR[build_rerank_candidates]
         S2[Stage 2: VLM rerank]
         PICK[pick_candidate_index or Gradio]
-        S1 --> S2 --> PICK
     end
-
     subgraph nav [Navigation]
         FM[format_navigation_plan]
-        RST[driver.reset_to_start_page]
-        LOOP[Agent step loop]
-        FM --> RST --> LOOP
+        LOOP[agent.step loop]
     end
-
+    UI --> S1
+    NL --> BR
+    NP --> BR
+    G --> LOOP
     Q --> S1
-    G --> S1
-    NI --> S1
-    NI --> FM
+    S1 --> BR --> S2 --> PICK
     PICK --> FM
+    NP --> FM
     Q --> FM
+    FM --> LOOP
     LOOP -->|screenshot + memory| AGENT[MAI-UI / UI-TARS]
     AGENT -->|action| DRV[Android / Harmony driver]
     DRV -->|execute| DEV[Device]
@@ -540,30 +541,39 @@ flowchart TB
 
 **Function:** `retrieve_nodes_from_user_intents_embeddings`
 
-- Loads precomputed `embedding` vectors from `node_intents.json` (written during exploration post-process).
+- Loads precomputed `embedding` vectors from **`user_intents.json`** (post-process Stage 6).
 - Encodes the user query with **BGE-M3** (`BAAI/bge-m3`).
 - Scores all nodes by cosine similarity and returns the top `top_k_in_first_stage_retrieval` hits.
-- Each candidate is enriched with `page_purpose` (from `graph.json`), `depth`, `user_intents`, and `ui_navigation_memory`.
 
-The query text is wrapped by `build_retrieval_query()` so embeddings align with how nodes were indexed (`PAGE_PURPOSE` + `USER_INTENTS`).
+**Query text:** `build_retrieval_query()` returns the user goal string as-is. Node indexing uses `embedding_text` built from **page description + user intents** during post-processing.
+
+### Build rerank payload
+
+**Function:** `build_rerank_candidates`
+
+Joins stage-1 hits with:
+
+| Source file | Fields used |
+|-------------|-------------|
+| `node_level_information.json` | `high_level`, `medium_level`, `low_level` → `page_description` |
+| `user_intents.json` | `user_intents` |
+| `node_navigation_plans.json` | plan list per node → `ui_navigation_memory` (route evidence for reranker) |
+
+Returns `{ "task_prompt": ..., "candidates": [...] }` for the VLM reranker.
 
 ### Node depth
 
 **Function:** `get_node_depths`
 
-Each graph node gets a **depth**: the shortest path length from the nearest root node (`is_root: true` in `graph.json`). Depth 0 is a root/home screen; higher values are deeper in the UI hierarchy.
-
-Depth is **not** used in stage-1 embedding search. It is attached to each candidate and passed to the VLM in stage 2 as an explicit decision signal, alongside `page_purpose`, embedding `score`, and `user_intents`.
-
-**Why depth matters:** Broad user queries (e.g. *"go to settings"*) should usually land on a **shallower**, more general parent page—not a deep sub-settings screen that only partially matches. Specific queries (e.g. *"change world clock style"*) should prefer the **deepest** page that directly satisfies the goal. The VLM prompt encodes this: match query specificity first, then use depth as a tie-breaker when relevance is similar (lower depth = easier to reach from the app root).
+Each graph node gets a **depth**: shortest path length from the nearest root (`is_root: true`). Depth is attached after reranking for display and Gradio labels; the VLM reranker also sees page descriptions and user intents.
 
 ### Stage 2 — VLM rerank
 
 **Function:** `VLM.rerank_candidates`
 
-- Sends the shortlist to a multimodal LLM with ranking rules: prefer direct `page_purpose` match, align with query breadth vs. specificity, then break ties with depth.
-- Returns `top_k_node_ids` (ordered best-first) and per-node `reasoning`.
-- Keeps the top `top_k_retrieval_in_stage_2` candidates for selection via `pick_candidate_index` or Gradio.
+- Input: user query + compact candidate list (`page_description`, `user_intents`, `retrieval_score`, `ui_navigation_memory`).
+- Output: ordered `top_k_node_ids` and per-node `reasoning`.
+- Keeps the top `top_k_retrieval_in_stage_2` candidates for `pick_candidate_index` or Gradio.
 
 ### Candidate selection — `pick_candidate_index` or Gradio
 
@@ -573,18 +583,19 @@ Depth is **not** used in stage-1 embedding search. It is attached to each candid
 
 - Opens a local Gradio UI at `http://127.0.0.1:7860`.
 - Shows screenshots and metadata (score, depth, page purpose, VLM reasoning).
-- User selects a candidate and clicks **Confirm and continue**; the script resumes with that `node_id`.
+- User selects a candidate and clicks **Confirm and continue**.
 
 Requires `pip install gradio`.
 
 ### Navigation memory formatting
 
-**Function:** `format_navigation_plan`
+**Function:** `get_ui_navigation_memory_for_node` → `format_navigation_plan`
 
-- Takes `ui_navigation_memory` for the selected node (list of plans: waypoint sequences, transition hints, optional `root_id`).
-- Produces a structured prompt telling the agent to pick the plan that matches the **current screenshot**, follow waypoints, and **finish immediately** when the goal screen is already visible.
+- Reads **`node_navigation_plans.json`**. Each node maps to a **list** of plan objects (`relevant_waypoint_sequence`, `transition_hints`).
+- `normalize_ui_navigation_memory()` accepts either that list format or legacy `{ "ui_navigation_memory": [...] }` wrappers.
+- `format_navigation_plan` builds the agent prompt: compare plans to the current screenshot, follow waypoints, **finish** when the goal is already visible.
 
-If `use_memory_for_navigation` is `false`, this step receives an empty list and the agent gets a short instruction to rely on the screenshot and goal only.
+If `use_memory_for_navigation` is `false`, the agent gets a short fallback instruction (screenshot + goal only).
 
 ### On-device navigation loop
 
@@ -600,15 +611,21 @@ for up to agent.max_steps:
 
 The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends screenshots and the formatted memory string.
 
+### GUI demo parity
+
+[`gui_demo/pipeline.py`](gui_demo/pipeline.py) exposes the same flow as [`inference.py`](inference.py): `load_artifacts` (with `user_intents.json` fallback to legacy `node_intents.json`), `run_retrieval`, `get_navigation_memory_for_node`, and `run_navigation_loop`. The React wizard calls these via FastAPI in [`gui_demo/inference_gui.py`](gui_demo/inference_gui.py).
+
+
 ---
 
 ## Required artifacts under `logs.root`
 
 | File / folder | Source | Used for |
 |---------------|--------|----------|
-| `graph.json` | Exploration export | Node `page_purpose`, graph structure, depths |
-| `node_intents.json` | Post-process Stage 1 + 3 | Embeddings, `user_intents`, `enhanced_page_summary` |
-| `node_navigation_plans.json` | Post-process Stage 2 | `ui_navigation_memory` per node |
+| `graph.json` | Exploration export | Graph structure, depths, legacy `page_purpose` |
+| `user_intents.json` | Post-process Stages 4 + 6 | `user_intents`, `embedding`, `embedding_text` |
+| `node_level_information.json` | Post-process Stage 1 | Page descriptions for reranking |
+| `node_navigation_plans.json` | Post-process Stage 5 | List of navigation plans per node |
 | `screenshots/{node_id}.jpg` | Exploration | Gradio / GUI candidate cards, debugging |
 
 If any of these are missing, retrieval or the picker may fail or show empty galleries.
@@ -649,6 +666,6 @@ Device control and agents are provided under `Driver/` and `Agents/` in this dir
 
 ## Related docs
 
-- [Exploration README](../exploration/README.md) — how `graph.json`, `node_intents.json`, and `node_navigation_plans.json` are produced
+- [Exploration README](../exploration/README.md) — how `user_intents.json`, `node_level_information.json`, and `node_navigation_plans.json` are produced
 - GUI launcher: [`run_gui.sh`](run_gui.sh) · backend: [`gui_demo/inference_gui.py`](gui_demo/inference_gui.py) · pipeline: [`gui_demo/pipeline.py`](gui_demo/pipeline.py)
 - Config templates: `inference/configs/*.yaml`

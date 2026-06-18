@@ -63,7 +63,8 @@ function LoadStatusIcon({ status }: { status: LoadItem["status"] }) {
 
 const DEFAULT_LOAD_ITEMS: LoadItem[] = [
   { key: "graph", label: "Graph (graph.json)", status: "pending" },
-  { key: "node_intents", label: "Node intents", status: "pending" },
+  { key: "node_intents", label: "User intents", status: "pending" },
+  { key: "node_level_information", label: "Node level information", status: "pending" },
   { key: "node_navigation_plans", label: "Navigation plans", status: "pending" },
   { key: "embeddings", label: "Embedding matrix", status: "pending" },
   { key: "bge_model", label: "BGE-M3 model", status: "pending" },

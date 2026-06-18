@@ -466,7 +466,8 @@ async def resources_load_stream() -> StreamingResponse:
 
         steps = [
             ("graph", "Loading graph.json"),
-            ("node_intents", "Loading node_intents.json"),
+            ("node_intents", "Loading user_intents.json"),
+            ("node_level_information", "Loading node_level_information.json"),
             ("node_navigation_plans", "Loading node_navigation_plans.json"),
             ("embeddings", "Building embedding matrix"),
             ("bge_model", "Loading BGE-M3 embedding model"),
@@ -484,7 +485,16 @@ async def resources_load_stream() -> StreamingResponse:
             session.load_status["graph"] = "done"
             yield _sse_event("progress", {"key": "graph", "label": "Graph loaded", "status": "done"})
             session.load_status["node_intents"] = "done"
-            yield _sse_event("progress", {"key": "node_intents", "label": "Node intents loaded", "status": "done"})
+            yield _sse_event("progress", {"key": "node_intents", "label": "User intents loaded", "status": "done"})
+            session.load_status["node_level_information"] = "done"
+            yield _sse_event(
+                "progress",
+                {
+                    "key": "node_level_information",
+                    "label": "Node level information loaded",
+                    "status": "done",
+                },
+            )
             session.load_status["node_navigation_plans"] = "done"
             yield _sse_event(
                 "progress",

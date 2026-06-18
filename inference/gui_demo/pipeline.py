@@ -36,18 +36,75 @@ def format_page_purpose_display(page_purpose) -> str:
 
 
 def build_retrieval_query(user_goal: str) -> str:
-    user_goal = user_goal.strip()
+    return str(user_goal or "").strip()
 
-    return f"""
-PAGE_TAG:
-{user_goal}
 
-PAGE_PURPOSE:
-{user_goal}
+def normalize_ui_navigation_memory(nav_entry) -> list:
+    """
+    node_navigation_plans.json stores each node as a list of plans:
 
-USER_INTENTS:
-{user_goal}
-""".strip()
+    {
+        "node_id": [
+            {
+                "relevant_waypoint_sequence": [...],
+                "transition_hints": [...]
+            }
+        ]
+    }
+    """
+    if nav_entry is None:
+        return []
+    if isinstance(nav_entry, list):
+        return nav_entry
+    if isinstance(nav_entry, dict):
+        memory = nav_entry.get("ui_navigation_memory")
+        if isinstance(memory, list):
+            return memory
+    return []
+
+
+def build_rerank_candidates(
+    task_prompt,
+    results,
+    node_information,
+    node_intents,
+    node_navigation_plans,
+):
+    candidates = []
+
+    for result in results:
+        node_id = result["node_id"]
+
+        node_info = node_information.get(node_id, {}) or {}
+        intent_info = node_intents.get(node_id, {}) or {}
+        nav_info = node_navigation_plans.get(node_id)
+        ui_navigation_memory = normalize_ui_navigation_memory(nav_info)
+
+        user_intents = (
+            result.get("user_intents")
+            or intent_info.get("user_intents")
+            or []
+        )
+
+        if isinstance(user_intents, dict):
+            user_intents = user_intents.get("user_intents", [])
+
+        candidates.append({
+            "node_id": node_id,
+            "retrieval_score": result.get("score", 0.0),
+            "page_description": {
+                "high_level": node_info.get("high_level", ""),
+                "medium_level": node_info.get("medium_level", ""),
+                "low_level": node_info.get("low_level", ""),
+            },
+            "user_intents": user_intents,
+            "ui_navigation_memory": ui_navigation_memory,
+        })
+
+    return {
+        "task_prompt": task_prompt,
+        "candidates": candidates,
+    }
 
 
 def get_node_depths(G: nx.Graph) -> dict:
@@ -178,11 +235,27 @@ def retrieve_nodes_from_user_intents_embeddings(
                 "score": float(scores[idx]),
                 "node_id": node_id,
                 "user_intents": item.get("user_intents", []),
-                "ui_navigation_memory": item.get("ui_navigation_memory", []),
                 "embedding_text": item.get("embedding_text", ""),
             }
         )
     return results
+
+
+def _load_json_if_exists(logs_root: str, filename: str) -> dict:
+    path = os.path.join(logs_root, filename)
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def _load_user_intents(logs_root: str) -> dict:
+    for filename in ("user_intents.json", "node_intents.json"):
+        data = _load_json_if_exists(logs_root, filename)
+        if data:
+            return data
+    return {}
 
 
 def visualize_actions_on_screenshots(screenshots, actions):
@@ -246,6 +319,7 @@ class RetrievalContext:
     graph: Any
     depths: dict
     node_intents: dict
+    node_level_information: dict
     node_navigation_plans: dict
     node_ids: list
     embeddings: np.ndarray
@@ -253,34 +327,13 @@ class RetrievalContext:
     logs_root: str = ""
 
 
-def load_node_navigation_plans(logs_root: str, node_intents: dict | None = None) -> dict:
-    """Load clustered navigation plans; fall back to node_intents if the file is missing."""
-    path = os.path.join(logs_root, "node_navigation_plans.json")
-    if os.path.isfile(path):
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-
-    node_intents = node_intents or {}
-    return {
-        node_id: {"ui_navigation_memory": item.get("ui_navigation_memory", [])}
-        for node_id, item in node_intents.items()
-        if isinstance(item, dict) and item.get("ui_navigation_memory")
-    }
+def load_node_navigation_plans(logs_root: str) -> dict:
+    """Load per-node navigation plans from node_navigation_plans.json."""
+    return _load_json_if_exists(logs_root, "node_navigation_plans.json")
 
 
 def get_ui_navigation_memory_for_node(ctx: RetrievalContext, node_id: str) -> list:
-    nav_entry = ctx.node_navigation_plans.get(node_id, {})
-    if isinstance(nav_entry, dict):
-        memory = nav_entry.get("ui_navigation_memory")
-        if memory:
-            return memory
-
-    intent_entry = ctx.node_intents.get(node_id, {})
-    if isinstance(intent_entry, dict):
-        return intent_entry.get("ui_navigation_memory", [])
-    return []
+    return normalize_ui_navigation_memory(ctx.node_navigation_plans.get(node_id))
 
 
 def load_artifacts(logs_root: str) -> RetrievalContext:
@@ -290,10 +343,9 @@ def load_artifacts(logs_root: str) -> RetrievalContext:
     graph = json_graph.node_link_graph(graph_data, edges="links")
     depths = get_node_depths(graph)
 
-    with open(os.path.join(logs_root, "node_intents.json"), "r", encoding="utf-8") as f:
-        node_intents = json.load(f)
-
-    node_navigation_plans = load_node_navigation_plans(logs_root, node_intents)
+    node_intents = _load_user_intents(logs_root)
+    node_level_information = _load_json_if_exists(logs_root, "node_level_information.json")
+    node_navigation_plans = load_node_navigation_plans(logs_root)
 
     node_ids, embedding_rows = zip(
         *[(node_id, item["embedding"]) for node_id, item in node_intents.items() if "embedding" in item]
@@ -305,6 +357,7 @@ def load_artifacts(logs_root: str) -> RetrievalContext:
         graph=graph,
         depths=depths,
         node_intents=node_intents,
+        node_level_information=node_level_information,
         node_navigation_plans=node_navigation_plans,
         node_ids=list(node_ids),
         embeddings=embeddings,
@@ -332,38 +385,42 @@ def run_retrieval(
         top_k=configs.top_k_in_first_stage_retrieval,
     )
 
-    candidates = []
-    for result in results:
-        node_id = result["node_id"]
-        node_entry = ctx.node_intents.get(node_id, {})
-        summary = node_entry.get("enhanced_page_summary", {}) or {}
+    rerank_payload = build_rerank_candidates(
+        query,
+        results,
+        ctx.node_level_information,
+        ctx.node_intents,
+        ctx.node_navigation_plans,
+    )
+    rerank_candidates = rerank_payload["candidates"]
 
-        candidates.append(
-            {
-                "node_id": node_id,
-                "page_tag": summary.get("tag", ""),
-                "page_purpose": summary.get("page_purpose", ""),
-                "screen_type": summary.get("screen_type", ""),
-                "selected_navigation": summary.get("selected_navigation", ""),
-                "depth": ctx.depths.get(node_id),
-                "score": result.get("score"),
-                "user_intents": result.get("user_intents") or node_entry.get("user_intents", []),
-            }
-        )
-
-    top_k_node_ids, vlm_reasoning = vlm_client.rerank_candidates(
-        query, candidates, top_k=configs.top_k_retrieval_in_stage_2
+    top_k_node_ids, rerank_result = vlm_client.rerank_candidates(
+        query,
+        rerank_candidates,
+        top_k=configs.top_k_retrieval_in_stage_2,
     )
     reasoning_map = (
-        vlm_reasoning.get("reasoning", {})
-        if isinstance(vlm_reasoning, dict)
+        rerank_result.get("reasoning", {})
+        if isinstance(rerank_result, dict)
         else {}
     )
+
     ordered = {nid: i for i, nid in enumerate(top_k_node_ids)}
-    candidates = sorted(
-        [c for c in candidates if c["node_id"] in top_k_node_ids],
-        key=lambda c: ordered[c["node_id"]],
-    )
+    candidates = [
+        {
+            **c,
+            "score": c.get("retrieval_score", c.get("score", 0.0)),
+            "depth": ctx.depths.get(c["node_id"], 0),
+            "page_tag": "",
+            "page_purpose": (
+                c.get("page_description", {}).get("high_level", "")
+                or c.get("page_description", {}).get("medium_level", "")
+            ),
+        }
+        for c in rerank_candidates
+        if c["node_id"] in top_k_node_ids
+    ]
+    candidates = sorted(candidates, key=lambda c: ordered[c["node_id"]])
     return candidates, reasoning_map
 
 
