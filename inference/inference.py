@@ -204,7 +204,8 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
             "No navigation memory is available for this task. "
             "Use only the current screenshot and the user goal to decide the next action. "
             "If the current screen already satisfies the final goal, do not perform more navigation actions. "
-            "Return the finish/done action immediately."
+            "Return the finish/done action immediately. "
+            "Don't leave the current application."
         )
 
     output_lines = []
@@ -214,6 +215,8 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         "There are at most 3 semantically distinct navigation plans to reach the target screen. "
         "Before acting, compare the current screenshot with the waypoint sequences and transition hints, "
         "then follow the plan that best matches the current screen. "
+        "Each transition hint has low-level (visual) and high-level (intent) descriptions; "
+        "prefer low-level to locate controls, and use high-level when the low-level target is not visible. "
         "Do not use root ids; match by visible UI state only. "
         "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan. "
         "All plans assume you start on the reset landing screen unless the screenshot clearly shows a blocker "
@@ -245,10 +248,23 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         if isinstance(hints, list) and hints:
             added_hint = False
             for hint in hints:
-                hint_str = str(hint).strip()
-                if hint_str:
-                    output_lines.append(f"- {hint_str}")
-                    added_hint = True
+                if isinstance(hint, dict):
+                    low = str(hint.get("low_level", "")).strip()
+                    high = str(hint.get("high_level", "")).strip()
+                    if low and high:
+                        output_lines.append(f"- Low: {low}\n  High: {high}")
+                        added_hint = True
+                    elif low:
+                        output_lines.append(f"- Low: {low}")
+                        added_hint = True
+                    elif high:
+                        output_lines.append(f"- High: {high}")
+                        added_hint = True
+                else:
+                    hint_str = str(hint).strip()
+                    if hint_str:
+                        output_lines.append(f"- {hint_str}")
+                        added_hint = True
             if not added_hint:
                 output_lines.append("(none)")
         else:
@@ -268,7 +284,8 @@ def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
         "Do not mix steps from different plans unless the screenshot clearly supports doing so. "
         "If the screenshot clearly disagrees with all plans, ignore the plans and follow the screenshot. "
         "Once the current screen already satisfies the final goal, do not perform more navigation actions. "
-        "Return the finish/done action immediately."
+        "Return the finish/done action immediately. "
+        "Don't leave the current application."
     )
 
     return "\n".join(output_lines).strip()

@@ -169,7 +169,7 @@ flowchart TB
 1. `graph.json` → NetworkX graph + per-node **depth** (shortest hop from nearest root).
 2. `user_intents.json` → `user_intents`, `embedding`, `embedding_text` (BGE-M3 index from post-process Stage 6).
 3. `node_level_information.json` → per-node page descriptions used in VLM reranking.
-4. `node_navigation_plans.json` → per-node **list** of route plans (`relevant_waypoint_sequence`, `transition_hints`) from post-process Stage 5.
+4. `node_navigation_plans.json` → per-node **list** of route plans from post-process Stage 5. Each plan has `relevant_waypoint_sequence` (≤ L−1 waypoints) and `transition_hints` (≤ L−1 hops; each hint is `{high_level, low_level}` — one action per graph hop, not one per parallel edge).
 5. BGE-M3 model loaded for query encoding at retrieval time.
 6. `VLM` client for stage-2 reranking.
 7. Agent client connected to `agent.url`.
@@ -180,7 +180,7 @@ flowchart TB
 2. **Stage 2** — `build_rerank_candidates` enriches hits with `page_description`, `user_intents`, and navigation plans; `VLM.rerank_candidates` reranks; keep top `top_k_retrieval_in_stage_2`.
 3. Return candidate cards with exploration screenshots (`GET /api/screenshots/{node_id}`).
 
-**Navigation memory** — for the selected node, `get_ui_navigation_memory_for_node` reads plans from `node_navigation_plans.json`, then `format_navigation_plan` builds the text prompt (waypoints + transition hints) passed to the agent.
+**Navigation memory** — for the selected node, `get_ui_navigation_memory_for_node` reads plans from `node_navigation_plans.json`, then `format_navigation_plan` builds the text prompt (waypoints + transition hints) passed to the agent. Plans are produced so that **transition hint count matches path hop count** (parallel exploration edges on one hop are collapsed at post-process Stage 5 into a single hint).
 
 **Execute** (`run_navigation_loop`):
 
@@ -557,7 +557,7 @@ Joins stage-1 hits with:
 |-------------|-------------|
 | `node_level_information.json` | `high_level`, `medium_level`, `low_level` → `page_description` |
 | `user_intents.json` | `user_intents` |
-| `node_navigation_plans.json` | plan list per node → `ui_navigation_memory` (route evidence for reranker) |
+| `node_navigation_plans.json` | plan list per node → `ui_navigation_memory` (waypoints + one hint per hop for reranker / agent prompt) |
 
 Returns `{ "task_prompt": ..., "candidates": [...] }` for the VLM reranker.
 
@@ -591,9 +591,24 @@ Requires `pip install gradio`.
 
 **Function:** `get_ui_navigation_memory_for_node` → `format_navigation_plan`
 
-- Reads **`node_navigation_plans.json`**. Each node maps to a **list** of plan objects (`relevant_waypoint_sequence`, `transition_hints`).
+- Reads **`node_navigation_plans.json`**. Each node maps to a **list** of plan objects.
 - `normalize_ui_navigation_memory()` accepts either that list format or legacy `{ "ui_navigation_memory": [...] }` wrappers.
-- `format_navigation_plan` builds the agent prompt: compare plans to the current screenshot, follow waypoints, **finish** when the goal is already visible.
+
+**Plan schema** (from post-process Stage 5):
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `relevant_waypoint_sequence` | `string[]` | Semantic page/state names along the route (at most **L − 1**, where L = pages on the source path) |
+| `transition_hints` | `object[]` | One hint per hop; each item has `high_level` (intent) and `low_level` (visual grounding) |
+
+A path with L graph nodes has **L − 1** hops. Inference expects **one transition hint per hop**, not one per parallel edge recorded during exploration. When a hop had multiple `alternative_actions` in post-process, Stage 5 should have collapsed them into a single hint (best action, merged `"X / Y"`, or noise removed).
+
+`format_navigation_plan` builds the agent prompt:
+
+- Up to **3** alternative plans may appear (one per top-ranked root→node path).
+- The agent compares waypoints to the current screenshot, selects the best-matching plan, and follows hints in order.
+- Each hint is rendered as `- Low: …` / `High: …` when both fields are present.
+- **Finish** when the final goal is already visible on screen.
 
 If `use_memory_for_navigation` is `false`, the agent gets a short fallback instruction (screenshot + goal only).
 
@@ -625,7 +640,7 @@ The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends scr
 | `graph.json` | Exploration export | Graph structure, depths, legacy `page_purpose` |
 | `user_intents.json` | Post-process Stages 4 + 6 | `user_intents`, `embedding`, `embedding_text` |
 | `node_level_information.json` | Post-process Stage 1 | Page descriptions for reranking |
-| `node_navigation_plans.json` | Post-process Stage 5 | List of navigation plans per node |
+| `node_navigation_plans.json` | Post-process Stage 5 | List of plans per node: `relevant_waypoint_sequence` + `transition_hints` (one `{high_level, low_level}` hint per hop) |
 | `screenshots/{node_id}.jpg` | Exploration | Gradio / GUI candidate cards, debugging |
 
 If any of these are missing, retrieval or the picker may fail or show empty galleries.
