@@ -1874,32 +1874,42 @@ class VLM:
             "user_intents": result.get("user_intents", [])
         }
 
-    
+        
     def get_navigation_plan(self, navigation_input):
-
+    
         system_prompt = """
     You generate compact mobile UI navigation plans.
 
     Input contains:
     - target_page
-    - paths
-    - each path has ordered pages and ordered actions between pages
+    - paths; each path has num_pages (L), ordered pages, and L-1 transitions
+    - each transition has alternative_actions: parallel ways to move from page[i] to page[i+1]
+    - alternative_actions on one transition are OR-options, NOT sequential steps
 
     Task:
     Create one navigation plan for each path.
 
     Each plan must contain:
     - relevant_waypoint_sequence: semantic page/state names the agent lands on
-    - transition_hints: ordered action instructions needed to reach the target
+    - transition_hints: ordered action hints needed to reach the target
+
+    Each transition_hints item must contain:
+    - high_level: the intended action
+    - low_level: how to visually locate/perform the action
 
     Rules:
     - Do not generate user intents.
     - Do not include node ids, edge ids, coordinates, screenshots, scores, or reasons.
     - Use page descriptions to name waypoints.
-    - Use action descriptions to write transition hints.
-    - transition_hints must preserve every action in order.
-    - Use low_level_action_description for grounding hints.
-    - Use high_level_action_description only to simplify/generalize the action.
+    - len(relevant_waypoint_sequence) <= L - 1 and len(transition_hints) <= L - 1.
+    - Produce exactly one transition_hint per path transition (one per hop), never one per alternative_action.
+    - For a transition with multiple alternative_actions, pick the single best action for reaching target_page, OR merge suitable options as one hint (e.g. "Tap X / Tap Y"), OR drop alternatives that are noise or misaligned with target_page and the destination page description.
+    - Scroll or minor in-page adjustments may share a waypoint with the previous page; do not add extra waypoints for them.
+    - Use high_level_action_description for high_level and low_level_action_description for low_level.
+    - low_level must describe stable visual anchors: control label, icon role, UI region, approximate location.
+    - low_level must NOT contain person names, profile names, company names, private identifiers, or dynamic personal details.
+    - Replace person-specific descriptions with generic terms like "profile card", "post author row", "user avatar", "feed post", or "profile entry".
+    - Avoid fragile dynamic details such as exact counts, timestamps, prices, notification badges, or temporary text unless essential for grounding.
     - Remove duplicate consecutive waypoints.
     - Do not include app launch, phone home screen, or OS-level states.
     - Do not include actions after reaching the target page.
@@ -1919,11 +1929,23 @@ class VLM:
             "semantic waypoint name"
         ],
         "transition_hints": [
-            "ordered navigation action hint"
+            {{
+            "high_level": "general intended action",
+            "low_level": "stable visual grounding hint without person names"
+            }}
         ]
         }}
     ]
     }}
+
+    Important:
+    - transition_hints must be a list of objects, not strings.
+    - One transition_hint per input transition; never expand parallel alternative_actions into multiple sequential hints.
+    - relevant_waypoint_sequence and transition_hints must each have at most L - 1 items (L = num_pages).
+    - high_level should be short and functional.
+    - low_level should help the agent find the control on screen.
+    - low_level must not include person names or private/dynamic identifiers.
+    - Do not include markdown or extra text.
     """.strip()
 
         response = dashscope.MultiModalConversation.call(

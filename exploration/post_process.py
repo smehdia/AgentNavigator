@@ -538,6 +538,7 @@ def save_navigation_plans(nx_graph, node_level_information, edge_level_informati
     write_lock = threading.Lock()
     node_ids = list(nx_graph.nodes())
 
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
@@ -593,10 +594,10 @@ def _process_node_navigation_plans(node_id, node_level_information, edge_level_i
             node_sequence = path_data.get("node_sequence", [])
 
             path_pages = []
-            path_actions = []
+            transitions = []
 
-            for node_id in node_sequence:
-                n = node_level_information.get(node_id, {}) or {}
+            for seq_node_id in node_sequence:
+                n = node_level_information.get(seq_node_id, {}) or {}
                 path_pages.append({
                     "high_level": n.get("high_level", ""),
                     "medium_level": n.get("medium_level", ""),
@@ -606,20 +607,22 @@ def _process_node_navigation_plans(node_id, node_level_information, edge_level_i
                 edge_key = f"{node_sequence[i]}|{node_sequence[i + 1]}"
                 edge_info = edge_level_information.get(edge_key, [])
 
-                path_actions.append([
-                    {
-                        "low_level_action_description": a.get(
-                            "low_level_action_description",
-                            "",
-                        ),
-                        "high_level_action_description": a.get(
-                            "high_level_action_description",
-                            "",
-                        ),
-                    }
-                    for a in edge_info
-                    if isinstance(a, dict)
-                ])
+                transitions.append({
+                    "alternative_actions": [
+                        {
+                            "low_level_action_description": a.get(
+                                "low_level_action_description",
+                                "",
+                            ),
+                            "high_level_action_description": a.get(
+                                "high_level_action_description",
+                                "",
+                            ),
+                        }
+                        for a in edge_info
+                        if isinstance(a, dict)
+                    ],
+                })
 
             navigation_input["paths"].append({
                 "path_id": str(path_id),
@@ -628,8 +631,10 @@ def _process_node_navigation_plans(node_id, node_level_information, edge_level_i
                     "path_reliability",
                     {},
                 ).get("score", 0),
+                "num_pages": len(node_sequence),
+                "num_transitions": max(0, len(node_sequence) - 1),
                 "pages": path_pages,
-                "actions": path_actions,
+                "transitions": transitions,
             })
 
         return navigation_input
@@ -769,33 +774,22 @@ if __name__ == "__main__":
     nx_graph = json_graph.node_link_graph(data, edges="links")
 
 
-    # node_level_information = save_node_level_information(nx_graph, vlm_client, configs, dbg)
-    with open(os.path.join(configs.logs.root, "node_level_information.json"), "r", encoding="utf-8") as f:
-        node_level_information = json.load(f)
-
-    # edge_level_information = save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg)
-
-    with open(os.path.join(configs.logs.root, "edge_level_information.json"), "r", encoding="utf-8") as f:
-        edge_level_information = json.load(f)
-
-    # path_intents = save_path_intents(nx_graph, node_level_information, edge_level_information, vlm_client, configs, dbg)
-    # dbg.log("Stage 4 complete: path_intents.json", color="green")
-
-    with open(os.path.join(configs.logs.root, "path_intents.json"), "r", encoding="utf-8") as f:
-        path_intents = json.load(f)
-
-
-    # user_intents = save_user_intents(nx_graph, node_level_information, path_intents, vlm_client, configs, dbg)
-    with open(os.path.join(configs.logs.root, "user_intents.json"), "r", encoding="utf-8") as f:
-        user_intents = json.load(f)
-
-    # node_navigation_plans = save_navigation_plans(nx_graph, node_level_information, edge_level_information, path_intents, user_intents, vlm_client, configs, dbg)
-
-    with open(os.path.join(configs.logs.root, "node_navigation_plans.json"), "r", encoding="utf-8") as f:
-        node_navigation_plans = json.load(f)
-
-
+    dbg.log("Stage 1 starting: node_level_information.json", color="yellow")
+    node_level_information = save_node_level_information(nx_graph, vlm_client, configs, dbg)
+    dbg.log("Stage 1 complete: node_level_information.json", color="green")
+    edge_level_information = save_edge_level_information(nx_graph, node_level_information, vlm_client, configs, dbg)
+    dbg.log("Stage 2 complete: edge_level_information.json", color="green")
+    dbg.log("Stage 3 starting: path_intents.json", color="yellow")
+    path_intents = save_path_intents(nx_graph, node_level_information, edge_level_information, vlm_client, configs, dbg)
+    dbg.log("Stage 3 complete: path_intents.json", color="green")
+    dbg.log("Stage 4 starting: user_intents.json", color="yellow")
+    user_intents = save_user_intents(nx_graph, node_level_information, path_intents, vlm_client, configs, dbg)
+    dbg.log("Stage 4 complete: user_intents.json", color="green")
+    dbg.log("Stage 5 starting: node_navigation_plans.json", color="yellow")
+    node_navigation_plans = save_navigation_plans(nx_graph, node_level_information, edge_level_information, path_intents, user_intents, vlm_client, configs, dbg)
+    dbg.log("Stage 5 complete: node_navigation_plans.json", color="green")
+    dbg.log("Stage 6 User Intents Embedding starting: user_intents.json", color="yellow")
     add_node_embeddings_to_user_intents(configs.logs.root, "node_level_information.json", "user_intents.json", "user_intents.json", "BAAI/bge-m3", 4, 8192)
-
+    dbg.log("Stage 6 User Intents Embedding complete: user_intents.json", color="green")
 
 
