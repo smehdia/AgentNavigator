@@ -287,7 +287,7 @@ Turns an explored **app graph** into page descriptions, transition metadata, pat
 | **2** | `save_edge_level_information` | `edge_level_information.json` | `get_transition_info` — action clusters between adjacent nodes (optional action crops) |
 | **3** | `save_path_intents` | `path_intents.json` | `get_path_intents` on each root→node path, then `get_top_paths` keeps up to **3** best paths per node |
 | **4** | `save_user_intents` | `user_intents.json` | `get_node_user_intents` — **text-only** natural-language intents for the current screen |
-| **5** | `save_navigation_plans` | `node_navigation_plans.json` | `get_navigation_plan` — waypoint sequences + transition hints for top paths |
+| **5** | `save_navigation_plans` | `node_navigation_plans.json` | `get_navigation_plan` — one hint per hop; collapses parallel `alternative_actions` |
 | **6** | `add_node_embeddings_to_user_intents` | `user_intents.json` (in place) | **BGE-M3** locally — one dense vector per node for retrieval |
 
 Uses `configs.post_process.use_yibu_api` to choose `VLM_Yibu` vs `VLM` (independent from `vlm.use_yibu_api` during exploration).
@@ -350,9 +350,10 @@ flowchart TB
 
 **Stage 2 — Edge-level information (`save_edge_level_information`)**
 
-- One VLM call per directed edge `(source → target)` (parallel edges grouped).
+- One VLM call per directed edge pair `(source → target)`; all **parallel** graph edges between the same pair are grouped into a single call.
 - Input: source/target page descriptions, edge descriptions, normalized bounding boxes, optional action crops.
 - Output: `transition_info` list with `low_level_action_description` and `high_level_action_description` per action cluster.
+- Stored under key `source|target` in **`edge_level_information.json`**. Multiple clusters mean the explorer recorded several distinct actions that led from the same source screen to the same target screen (e.g. scroll vs tap a button). These are **alternatives**, not a required action sequence — Stage 5 passes them as `alternative_actions` per hop.
 
 **Stage 3 — Path intents (`save_path_intents`)**
 
@@ -369,16 +370,71 @@ flowchart TB
 
 **Stage 5 — Navigation plans (`save_navigation_plans`)**
 
-- **Text-only** VLM call per node (`get_navigation_plan`).
-- Input bundles target page description + top paths (pages + transition actions from Stages 1–2).
-- Output: **`node_navigation_plans.json`** maps each `node_id` to a **list** of plans:
+- **Text-only** VLM call per node (`get_navigation_plan` in `VLM` or `VLM_Yibu` — both share the same prompt; controlled by `post_process.use_yibu_api`).
+- `prepare_navigation_plan_input` (in `_process_node_navigation_plans`) builds one payload per node:
+
+```json
+{
+  "target_page": { "high_level": "...", "medium_level": "...", "low_level": "..." },
+  "paths": [
+    {
+      "path_id": "0",
+      "path_user_goals": ["..."],
+      "path_reliability_score": 4,
+      "num_pages": 3,
+      "num_transitions": 2,
+      "pages": [
+        { "high_level": "...", "medium_level": "..." },
+        { "high_level": "...", "medium_level": "..." },
+        { "high_level": "...", "medium_level": "..." }
+      ],
+      "transitions": [
+        {
+          "alternative_actions": [
+            {
+              "high_level_action_description": "Open the shopping cart.",
+              "low_level_action_description": "Tap the Cart icon in the bottom navigation bar."
+            }
+          ]
+        },
+        {
+          "alternative_actions": [
+            { "high_level_action_description": "Scroll vertically...", "low_level_action_description": "..." },
+            { "high_level_action_description": "Tap a filter chip...", "low_level_action_description": "..." }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+- **`pages`** — ordered node descriptions along the path (length **L**).
+- **`transitions`** — length **L − 1**; each item is one hop `page[i] → page[i+1]`.
+- **`alternative_actions`** — parallel actions from Stage 2 for that hop (**OR** options, not steps to perform in order).
+
+The VLM (`get_navigation_plan`) must produce **one plan per input path** with:
+
+- **`relevant_waypoint_sequence`** — at most **L − 1** semantic waypoint names (scroll-only hops may share a waypoint with the previous page).
+- **`transition_hints`** — at most **L − 1** items, **exactly one per transition**. For hops with multiple `alternative_actions`, the model picks the best action, merges suitable options (e.g. `"Tap X / Tap Y"`), or drops noise misaligned with `target_page`.
+
+- Output: **`node_navigation_plans.json`** maps each `node_id` to a **list** of plans (the `ui_navigation_memory` array from the VLM response):
 
 ```json
 {
   "node_id": [
     {
-      "relevant_waypoint_sequence": ["...", "..."],
-      "transition_hints": ["Tap the filter chip near the top of the screen."]
+      "relevant_waypoint_sequence": ["Home", "Shopping cart"],
+      "transition_hints": [
+        {
+          "high_level": "Open the shopping cart.",
+          "low_level": "Tap the Cart icon in the bottom navigation bar."
+        },
+        {
+          "high_level": "Scroll vertically to view more content.",
+          "low_level": "Perform a vertical scroll gesture across the main content area."
+        }
+      ]
     }
   ]
 }
@@ -424,10 +480,10 @@ flowchart TB
 | Field | Stage | Notes |
 |-------|-------|-------|
 | `high_level` / `medium_level` / `low_level` | 1 | Per-node page description; used in reranking and nav-plan input |
-| `transition_info` | 2 | Per edge key `source|target` |
+| `transition_info` | 2 | Per edge key `source|target`; multiple clusters = parallel alternatives |
 | `path_user_goals`, `path_reliability` | 3 | Up to 3 paths per node in `path_intents.json` |
 | `user_intents` | 4 | Natural-language navigation commands for the target screen |
-| plan list | 5 | `relevant_waypoint_sequence` + `transition_hints` per path |
+| plan list | 5 | `relevant_waypoint_sequence` (≤ L−1) + `transition_hints` (≤ L−1, one `{high_level, low_level}` object per hop) |
 | `embedding_text`, `embedding` | 6 | One vector per node for cosine retrieval |
 
 ### Run via `run_post_process.sh`
@@ -486,7 +542,7 @@ Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use t
 | `edge_level_information.json` | Per-edge `transition_info` action clusters |
 | `path_intents.json` | Top paths per node with goals and reliability scores |
 | `user_intents.json` | Per-node `user_intents`, plus `embedding_text` + `embedding` after Stage 6 |
-| `node_navigation_plans.json` | Per-node **list** of navigation plans |
+| `node_navigation_plans.json` | Per-node **list** of plans (`relevant_waypoint_sequence`, `transition_hints` with one hint per hop) |
 | `post_process.log` | Console log when using `run_post_process.sh` |
 
 ### Preparing an app for inference (checklist)
@@ -1308,7 +1364,7 @@ Outputs under `logs.root` (e.g. `explored_apps/clock/`):
 | `num_nodes_vs_walk.png` | Exploration progress chart (updated after each walk); see [Exploration progress plot](#exploration-progress-plot) |
 | `interactive_node_graph.html` | Visual graph explorer |
 | `user_intents.json` | Post-processing Stages 4+6: `user_intents`, `embedding_text`, `embedding` |
-| `node_navigation_plans.json` | Post-processing Stage 5: per-node list of navigation plans |
+| `node_navigation_plans.json` | Post-processing Stage 5: per-node list of plans (≤ L−1 waypoints and hints per path) |
 | `post_process.log` | Console stdout/stderr when using `run_post_process.sh` |
 
 ### Exploration progress plot
