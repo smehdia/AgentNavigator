@@ -13,7 +13,7 @@ default:
     appPackage: "com.yelp.android"
     appActivity: ".home.ui.RootSingleActivity"
     skip_exploration_for_no_app_package: true
-    reset_instruction: "Go to the Home tab. If already there, return finished."
+    reset_instruction: "Go to the Search tab. If already there, return finished."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
