@@ -42,3 +42,4 @@ default:
   top_k_in_first_stage_retrieval: 30
   top_k_retrieval_in_stage_2: 5
   pick_candidate_index: 0    # 0 means best candidate, 1 means second best, ... -1 means use gradio to pick candidate  (has to be less than top_k_retrieval_in_stage_2)
+

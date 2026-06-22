@@ -1,0 +1,43 @@
+
+default:
+
+  debug_mode: False
+
+  app:
+    name: "Temu"
+    description: "Temu is an e-commerce shopping app with product categories, deals, flash sales, coupons, orders, and account settings. It frequently shows promotional popups, ads, and dynamic product content."
+
+  driver:
+    device_id: "R3CX20L5N6F"
+    os_name: "android"
+    appPackage: "com.einnovation.temu"
+    appActivity: "com.baogong.splash.activity.MainFrameActivity"
+    skip_exploration_for_no_app_package: true
+    reset_instruction: "Go to the Home tab. (if Home tab is highlighted (active) you don't need to do anything just return Finish)"
+
+  vlm:
+    alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
+    yibu_api_key: 'sk-caIdHUNLbUgJ4vpB3LFT2FQhpV4ELNgmL5PXBGgJq1kvLL8C'
+    use_yibu_api: true
+
+  agent:
+    verbose_print: false
+    url: "http://10.193.241.177:8089/v1"
+    model_name: "mai_ui"
+    settings: 
+      history_n: 3
+      resize_factor: 0.75
+    max_steps: 10
+
+  logs:
+    root: "../exploration/explored_apps/temu"
+    resume_from_checkpoint: true
+
+  batch_mode: true
+  output_dir: "./results"
+
+  use_memory_for_navigation: true
+  query: "Navigate to the Feedback page."
+  top_k_in_first_stage_retrieval: 30
+  top_k_retrieval_in_stage_2: 5
+  pick_candidate_index: 0    # 0 means best candidate, 1 means second best, ... -1 means use gradio to pick candidate  (has to be less than top_k_retrieval_in_stage_2)
