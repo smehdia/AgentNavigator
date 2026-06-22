@@ -512,9 +512,11 @@ def _process_user_intents(node_id, node_level_information, path_intents, vlm_cli
 
     out_edges = list(nx_graph.out_edges(node_id, data=True))
     out_edges = [
-        edge_data[2]['description']
-        for edge_data in out_edges
-        if str(edge_data[2].get('type', '')).lower() not in ('scroll', 'swipe')
+        data["description"]
+        for source, target, data in nx_graph.out_edges(node_id, data=True)
+        if source != target
+        and str(data.get("type", "")).lower() not in ("scroll", "swipe")
+        and data.get("description")
     ]
 
     user_intents = vlm_client.get_node_user_intents(node_info, path_intents, out_edges)
