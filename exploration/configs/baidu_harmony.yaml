@@ -12,6 +12,7 @@ default:
     os_name: "harmony"
     appPackage: "com.baidu.baiduapp"
     appActivity: "EntryAbility"
+    skip_scroll_up_on_reset: true
     skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Baidu app package (e.g., after navigating away).
     reset_instruction: "Go to the home tab (left most tab in the bottom navigation bar) if there is an advertisement or pop up close it. On the top bar select Recommended (推荐)."
 

@@ -12,6 +12,7 @@ default:
     os_name: "harmony"
     appPackage: "com.sdu.didi.hmos.psnger"
     appActivity: "EntryAbility"
+    skip_scroll_up_on_reset: true
     skip_exploration_for_no_app_package: true # If true, skip exploration when not in the DiDi app package (e.g., after navigating away).
     reset_instruction: "If there is an advertisement or pop up close it. If there is not return finished."
 
