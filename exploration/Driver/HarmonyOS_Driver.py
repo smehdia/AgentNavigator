@@ -198,10 +198,10 @@ class HarmonyDriver(BaseDriver):
         self._hdc_run(["shell", "uitest", "uiInput", "text", str(text)], timeout=15)
 
     def back(self) -> None:
-        self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "back"], timeout=10)
+        self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "Back"], timeout=10)
 
     def home(self) -> None:
-        self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "home"], timeout=10)
+        self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "Home"], timeout=10)
 
     def get_screen_size(self) -> Tuple[int, int]:
         out = self._hdc_out(["shell", "hidumper", "-s", "DisplayManagerService", "-a", "dumpDisplayInfo"], timeout=10).decode(
