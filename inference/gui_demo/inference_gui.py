@@ -47,6 +47,8 @@ from .pipeline import (
     load_artifacts,
     run_navigation_loop,
     run_retrieval,
+    save_trajectory_mp4,
+    trajectory_mp4_filename,
     visualize_actions_on_screenshots,
 )
 
@@ -57,6 +59,54 @@ DEFAULT_CONFIG_PATH = CONFIGS_DIR / "outlook_android.yaml"
 WEB_DIST = GUI_DEMO_DIR / "web" / "dist"
 
 dbg = Debugger(palette="soft", indent_size=2, width=90)
+
+TRAJECTORY_MP4_DIR = os.environ.get("AGENTNAV_SAVE_TRAJECTORY_MP4_DIR", "").strip()
+TRAJECTORY_MP4_FPS = float(os.environ.get("AGENTNAV_TRAJECTORY_MP4_FPS", "1") or "1")
+
+
+def _candidates_for_trajectory_mp4() -> list[dict]:
+    items: list[dict] = []
+    for c in session.candidates:
+        items.append(
+            {
+                **c,
+                "page_label": format_candidate_label(c),
+                "vlm_reasoning": session.vlm_reasoning.get(c.get("node_id", ""), ""),
+            }
+        )
+    return items
+
+
+def _maybe_save_trajectory_mp4(
+    screenshots: list,
+    actions: list,
+    *,
+    query: str,
+    finish_flag: bool,
+    final_screenshot=None,
+    candidates: Optional[list] = None,
+    selected_node_id: Optional[str] = None,
+    logs_root: Optional[str] = None,
+) -> Optional[str]:
+    if not TRAJECTORY_MP4_DIR or not screenshots or not actions:
+        return None
+
+    output_path = Path(TRAJECTORY_MP4_DIR) / trajectory_mp4_filename(query, session.active_config_id)
+    try:
+        return save_trajectory_mp4(
+            screenshots,
+            actions,
+            output_path,
+            final_screenshot=final_screenshot if finish_flag else None,
+            fps=TRAJECTORY_MP4_FPS,
+            query=query,
+            candidates=candidates,
+            selected_node_id=selected_node_id,
+            logs_root=logs_root,
+        )
+    except Exception as exc:
+        dbg.log(f"Failed to save trajectory MP4: {exc}", color="yellow")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -770,13 +820,31 @@ async def ws_execution(websocket: WebSocket) -> None:
 
         screenshots, actions, finish_flag, stopped = await nav_task
 
+        final_shot = screenshots[-1] if finish_flag and len(screenshots) > len(collected_actions) else None
+        trajectory_mp4_path = _maybe_save_trajectory_mp4(
+            collected_screenshots,
+            collected_actions,
+            query=query,
+            finish_flag=finish_flag,
+            final_screenshot=final_shot,
+            candidates=_candidates_for_trajectory_mp4()
+            if getattr(cfg, "use_memory_for_navigation", False) and session.candidates
+            else None,
+            selected_node_id=node_id,
+            logs_root=session.logs_root(),
+        )
+
         if stopped:
             await websocket.send_json(
-                {"type": "stopped", "total_steps": len(actions), "message": "Navigation stopped by user"}
+                {
+                    "type": "stopped",
+                    "total_steps": len(actions),
+                    "message": "Navigation stopped by user",
+                    "trajectory_mp4": trajectory_mp4_path,
+                }
             )
         else:
-            if len(screenshots) > len(collected_screenshots):
-                final_shot = screenshots[-1]
+            if final_shot is not None:
                 await websocket.send_json(
                     {
                         "type": "step",
@@ -789,7 +857,14 @@ async def ws_execution(websocket: WebSocket) -> None:
                     }
                 )
 
-            await websocket.send_json({"type": "done", "success": finish_flag, "total_steps": len(actions)})
+            await websocket.send_json(
+                {
+                    "type": "done",
+                    "success": finish_flag,
+                    "total_steps": len(actions),
+                    "trajectory_mp4": trajectory_mp4_path,
+                }
+            )
     except WebSocketDisconnect:
         nav_task.cancel()
     except Exception as exc:

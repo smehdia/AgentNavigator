@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import cv2
@@ -275,6 +278,32 @@ def _load_user_intents(logs_root: str) -> dict:
     return {}
 
 
+def _scroll_swipe_arrow_points(
+    img: np.ndarray,
+    coords,
+    direction: str,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Return swipe start/end pixels for a directional scroll (matches BaseDriver)."""
+    h, w = img.shape[:2]
+    if coords and len(coords) >= 2:
+        cx, cy = int(coords[0]), int(coords[1])
+    else:
+        cx, cy = w // 2, h // 2
+
+    direction = str(direction or "down").strip().lower()
+    if direction not in ("up", "down", "left", "right"):
+        direction = "down"
+
+    dx, dy = int(w * 0.35), int(h * 0.35)
+    if direction == "down":
+        return (cx, cy), (cx, max(1, cy - dy))
+    if direction == "up":
+        return (cx, cy), (cx, min(h - 1, cy + dy))
+    if direction == "left":
+        return (cx, cy), (max(1, cx - dx), cy)
+    return (cx, cy), (min(w - 1, cx + dx), cy)
+
+
 def visualize_actions_on_screenshots(screenshots, actions):
     if not screenshots or not actions:
         return screenshots
@@ -288,7 +317,6 @@ def visualize_actions_on_screenshots(screenshots, actions):
         for i in range(min(num_actions, num_screenshots))
         if str(actions[i].get("type", "")).strip().lower() not in {"finished", "finish"}
     ]
-    prev_coords = None
     for i in action_indices:
         img = annotated[i]
         act = actions[i]
@@ -302,16 +330,97 @@ def visualize_actions_on_screenshots(screenshots, actions):
                 x, y = int(coords[0]), int(coords[1])
                 cv2.circle(img, (x, y), 40, color_click, thickness=10)
         elif action_type in ("scroll", "swipe"):
-            if prev_coords and coords:
-                p1 = (int(prev_coords[0]), int(prev_coords[1]))
-                p2 = (int(coords[0]), int(coords[1]))
+            p1, p2 = _scroll_swipe_arrow_points(img, coords, act.get("direction", "down"))
+            cv2.arrowedLine(img, p1, p2, color_arrow, thickness=12, tipLength=0.2)
+        elif action_type == "drag":
+            start = act.get("start_coordinate") or coords
+            end = act.get("end_coordinate")
+            if start and end:
+                p1 = (int(start[0]), int(start[1]))
+                p2 = (int(end[0]), int(end[1]))
                 cv2.arrowedLine(img, p1, p2, color_arrow, thickness=12, tipLength=0.2)
-            elif coords:
-                x, y = int(coords[0]), int(coords[1])
-                cv2.circle(img, (x, y), 30, color_arrow, thickness=8)
-        prev_coords = coords
 
     return annotated
+
+
+def build_trajectory_frames(
+    screenshots: list,
+    actions: list,
+    *,
+    final_screenshot=None,
+    query: Optional[str] = None,
+    candidates: Optional[list] = None,
+    selected_node_id: Optional[str] = None,
+    logs_root: Optional[str] = None,
+) -> list[np.ndarray]:
+    from .frame_renderer import build_gui_trajectory_frames
+
+    return build_gui_trajectory_frames(
+        screenshots,
+        actions,
+        final_screenshot=final_screenshot,
+        query=query,
+        candidates=candidates,
+        selected_node_id=selected_node_id,
+        logs_root=logs_root,
+        annotate_screenshots=visualize_actions_on_screenshots,
+    )
+
+
+def trajectory_mp4_filename(query: str, config_id: str = "run") -> str:
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    slug = re.sub(r"[^\w\-]+", "_", str(query or "").strip()[:40]).strip("_") or "run"
+    safe_config = re.sub(r"[^\w\-]+", "_", str(config_id or "run").strip()) or "run"
+    return f"{ts}_{safe_config}_{slug}.mp4"
+
+
+def save_trajectory_mp4(
+    screenshots: list,
+    actions: list,
+    output_path: os.PathLike | str,
+    *,
+    final_screenshot=None,
+    fps: float = 1.0,
+    query: Optional[str] = None,
+    candidates: Optional[list] = None,
+    selected_node_id: Optional[str] = None,
+    logs_root: Optional[str] = None,
+) -> str:
+    """Write trajectory frames (GUI-style cards with action overlays) to an MP4 file."""
+    frames = build_trajectory_frames(
+        screenshots,
+        actions,
+        final_screenshot=final_screenshot,
+        query=query,
+        candidates=candidates,
+        selected_node_id=selected_node_id,
+        logs_root=logs_root,
+    )
+    if not frames:
+        raise ValueError("No trajectory frames to write")
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*"mp4v"),
+        float(fps),
+        (width, height),
+    )
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open video writer for {output_path}")
+
+    try:
+        for frame in frames:
+            if frame.shape[0] != height or frame.shape[1] != width:
+                frame = cv2.resize(frame, (width, height))
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    return str(output_path.resolve())
 
 
 def parse_action_from_step(step_result) -> dict:
@@ -323,10 +432,24 @@ def parse_action_from_step(step_result) -> dict:
     elif hasattr(parsed, "orig_coords") and parsed.orig_coords and "point" in parsed.orig_coords:
         coords = parsed.orig_coords["point"]
     thought = getattr(parsed, "thought", None) or ""
+    params = getattr(parsed, "params", None) or {}
+    direction = params.get("direction")
+
+    start_coordinate = None
+    end_coordinate = None
+    orig_coords = getattr(parsed, "orig_coords", None) or {}
+    if "start_point" in orig_coords:
+        start_coordinate = orig_coords["start_point"]
+    if "end_point" in orig_coords:
+        end_coordinate = orig_coords["end_point"]
+
     return {
         "parsed": parsed,
         "type": action_type,
         "coordinate": coords,
+        "direction": direction,
+        "start_coordinate": start_coordinate,
+        "end_coordinate": end_coordinate,
         "thought": thought,
     }
 
@@ -481,6 +604,9 @@ def run_navigation_loop(
         action_record = {
             "type": parsed_action["type"],
             "coordinate": parsed_action["coordinate"],
+            "direction": parsed_action.get("direction"),
+            "start_coordinate": parsed_action.get("start_coordinate"),
+            "end_coordinate": parsed_action.get("end_coordinate"),
             "thought": parsed_action["thought"],
         }
         actions.append(action_record)

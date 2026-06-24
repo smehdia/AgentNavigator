@@ -364,7 +364,7 @@ export default function App() {
             {
               id: uid(),
               role: "assistant",
-              content: `Navigation stopped after ${data.total_steps} step(s). Send a new prompt to start again.`,
+              content: `Navigation stopped after ${data.total_steps} step(s).${data.trajectory_mp4 ? ` Trajectory saved to \`${data.trajectory_mp4}\`.` : ""} Send a new prompt to start again.`,
             },
           ]);
           setNavPhase("input");
@@ -376,8 +376,8 @@ export default function App() {
               id: uid(),
               role: "assistant",
               content: data.success
-                ? `Navigation finished successfully in ${data.total_steps} steps. Send a new prompt to run again.`
-                : `Max steps reached (${data.total_steps}). Send a new prompt to try again.`,
+                ? `Navigation finished successfully in ${data.total_steps} steps.${data.trajectory_mp4 ? ` Trajectory saved to \`${data.trajectory_mp4}\`.` : ""} Send a new prompt to run again.`
+                : `Max steps reached (${data.total_steps}).${data.trajectory_mp4 ? ` Trajectory saved to \`${data.trajectory_mp4}\`.` : ""} Send a new prompt to try again.`,
             },
           ]);
           setNavPhase("input");
