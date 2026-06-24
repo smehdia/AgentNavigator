@@ -165,7 +165,7 @@ class VLM:
     """.strip()
 
         response = MultiModalConversation.call(
-            model="qwen3.6-plus",
+            model="qwen3.5-flash",
             messages=[
                 {"role": "system", "content": [{"text": system_prompt}]},
                 {"role": "user", "content": [{"text": user_prompt}]},

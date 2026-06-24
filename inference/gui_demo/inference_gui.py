@@ -38,7 +38,7 @@ from Agents.factory import build_agent
 from Debugger import Debugger
 from Driver.factory import build_driver
 from FlagEmbedding import BGEM3FlagModel
-from VLM import VLM
+from VLM_Yibu import build_vlm_client
 
 from .pipeline import (
     encode_image_jpeg_b64,
@@ -564,9 +564,14 @@ async def resources_load_stream() -> StreamingResponse:
             yield _sse_event("progress", {"key": "bge_model", "label": "BGE-M3 loaded", "status": "done"})
 
             cfg = _config_object()
-            session.vlm_client = await asyncio.to_thread(VLM, cfg, dbg)
+            session.vlm_client = await asyncio.to_thread(build_vlm_client, cfg, dbg)
+            vlm_label = (
+                "VLM client ready (Yibu)"
+                if getattr(getattr(cfg, "vlm", None), "use_yibu_api", False)
+                else "VLM client ready"
+            )
             session.load_status["vlm"] = "done"
-            yield _sse_event("progress", {"key": "vlm", "label": "VLM client ready", "status": "done"})
+            yield _sse_event("progress", {"key": "vlm", "label": vlm_label, "status": "done"})
 
             if not session.agent_ok:
                 ok, model_id, msg = _check_agent_health(session.config.get("agent", {}).get("url", ""))

@@ -4,7 +4,7 @@ from dynaconf import Dynaconf
 from Debugger import Debugger
 from Driver.factory import build_driver
 
-from VLM import VLM
+from VLM_Yibu import build_vlm_client
 from Agents.factory import build_agent
 
 import json
@@ -555,7 +555,7 @@ if __name__ == "__main__":
 
     agent = build_agent(model_name=configs.agent.model_name, url=configs.agent.url, agent_settings=configs.agent.settings, debugger=dbg)
     driver = build_driver(settings=configs.driver, agent=agent)
-    vlm_client = VLM(configs, dbg)
+    vlm_client = build_vlm_client(configs, dbg)
     batch_mode = configs.get("batch_mode", False)
     output_dir = configs.get("output_dir", None)
 
