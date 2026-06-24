@@ -8,7 +8,7 @@ default:
     description: "The Yelp app allows users to search for and review local businesses, such as restaurants and shops, while providing ratings, photos, and user-generated content."
 
   driver:
-    device_id: "emulator-5554"
+    device_id: "R3CX20L5N6F"
     os_name: "android"
     appPackage: "com.yelp.android"
     appActivity: ".home.ui.RootSingleActivity"
@@ -22,7 +22,7 @@ default:
 
   agent:
     verbose_print: false
-    url: "http://10.193.241.177:8089/v1"
+    url: "http://10.193.241.177:8090/v1"
     model_name: "mai_ui"
     settings: 
       history_n: 3
