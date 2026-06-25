@@ -139,6 +139,13 @@ class ExecuteStartRequest(BaseModel):
     query: str
     node_id: Optional[str] = None
     reset_to_start_page: bool = True
+    model_thinking: bool = True
+
+
+def _apply_model_thinking(agent: Any, enabled: bool) -> None:
+    client = getattr(agent, "agent_client", None)
+    if client is not None and hasattr(client, "set_model_thinking"):
+        client.set_model_thinking(enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +182,7 @@ class InferenceSession:
         self._executing: bool = False
         self._stop_requested: bool = False
         self.reset_to_start_page: bool = True
+        self.model_thinking: bool = True
 
     def driver_settings(self) -> dict:
         d = dict(self.config.get("driver", {}))
@@ -590,6 +598,10 @@ async def resources_load_stream() -> StreamingResponse:
                 session.agent_settings(),
                 dbg,
             )
+            _apply_model_thinking(
+                session.agent,
+                bool(session.agent_settings().get("model_thinking", True)),
+            )
             session.load_status["agent"] = "done"
             yield _sse_event("progress", {"key": "agent", "label": "Agent connected", "status": "done"})
 
@@ -718,6 +730,8 @@ def execute_start(body: ExecuteStartRequest) -> dict:
     session.current_query = query
     session.selected_node_id = node_id
     session.reset_to_start_page = body.reset_to_start_page
+    session.model_thinking = body.model_thinking
+    _apply_model_thinking(session.agent, body.model_thinking)
     session._stop_requested = False
     return {"ok": True, "message": "Connect to /ws/execution to stream steps"}
 
@@ -755,6 +769,7 @@ async def ws_execution(websocket: WebSocket) -> None:
         navigation_memory = format_navigation_plan([], query)
 
     max_steps = getattr(getattr(cfg, "agent", None), "max_steps", 10) or 10
+    _apply_model_thinking(session.agent, session.model_thinking)
     step_queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_event_loop()
     session._stop_requested = False
@@ -808,6 +823,7 @@ async def ws_execution(websocket: WebSocket) -> None:
             annotated_list = visualize_actions_on_screenshots([screenshot], [action])
             annotated = annotated_list[0] if annotated_list else screenshot
 
+            timing = payload.get("timing") or action.get("timing") or {}
             await websocket.send_json(
                 {
                     "type": "step",
@@ -817,6 +833,9 @@ async def ws_execution(websocket: WebSocket) -> None:
                     "coordinate": action.get("coordinate"),
                     "screenshot_b64": encode_image_jpeg_b64(screenshot),
                     "annotated_b64": encode_image_jpeg_b64(annotated),
+                    "driver_screenshot_s": timing.get("driver_screenshot_s"),
+                    "model_prediction_s": timing.get("model_prediction_s"),
+                    "other_processing_s": timing.get("other_processing_s"),
                 }
             )
 

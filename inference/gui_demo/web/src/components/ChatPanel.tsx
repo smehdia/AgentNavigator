@@ -15,6 +15,8 @@ interface Props {
   selectingNodeId: string | null;
   resetToStartPage: boolean;
   onResetToStartPageChange: (v: boolean) => void;
+  modelThinking: boolean;
+  onModelThinkingChange: (v: boolean) => void;
 }
 
 function CandidateCards({
@@ -62,6 +64,26 @@ function CandidateCards({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function formatTimingSeconds(value: number | undefined): string {
+  if (value == null || Number.isNaN(value)) {
+    return "—";
+  }
+  return value.toFixed(2);
+}
+
+function StepTimingBreakdown({ timing }: { timing?: { driver_screenshot_s?: number; model_prediction_s?: number; other_processing_s?: number } }) {
+  if (!timing) {
+    return null;
+  }
+  return (
+    <div className="mt-3 pt-2 border-t border-slate-200 text-[11px] font-mono text-slate-500 space-y-0.5">
+      <div>driver screenshot: {formatTimingSeconds(timing.driver_screenshot_s)} sec</div>
+      <div>model prediction: {formatTimingSeconds(timing.model_prediction_s)} sec</div>
+      <div>other processing: {formatTimingSeconds(timing.other_processing_s)} sec</div>
     </div>
   );
 }
@@ -118,6 +140,8 @@ export default function ChatPanel({
   selectingNodeId,
   resetToStartPage,
   onResetToStartPageChange,
+  modelThinking,
+  onModelThinkingChange,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -138,15 +162,24 @@ export default function ChatPanel({
 
   return (
     <div className="flex flex-col h-full min-h-[400px] bg-white rounded-xl border border-slate-200 overflow-hidden">
-      <div className="px-3 pt-3 pb-2 border-b border-slate-100 shrink-0">
+      <div className="px-3 pt-3 pb-2 border-b border-slate-100 shrink-0 space-y-2">
         <Toggle
           label="reset_to_start_page"
           checked={resetToStartPage}
           onChange={onResetToStartPageChange}
           disabled={phase === "executing"}
         />
-        <p className="text-[10px] text-slate-400 mt-1 px-1">
+        <p className="text-[10px] text-slate-400 px-1">
           When on, resets the app to the start screen before executing navigation.
+        </p>
+        <Toggle
+          label="model_thinking"
+          checked={modelThinking}
+          onChange={onModelThinkingChange}
+          disabled={phase === "executing"}
+        />
+        <p className="text-[10px] text-slate-400 px-1">
+          When on, the agent returns reasoning in &lt;thinking&gt; tags. When off, only &lt;tool_call&gt; is used.
         </p>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -201,6 +234,7 @@ export default function ChatPanel({
                   className="mt-3 rounded-lg max-h-64 object-contain border border-slate-200"
                 />
               )}
+              {msg.role === "step" && <StepTimingBreakdown timing={msg.timing} />}
             </div>
           </div>
         ))}

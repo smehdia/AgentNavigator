@@ -28,6 +28,7 @@ default:
     settings: 
       history_n: 3
       resize_factor: 0.75
+      model_thinking: true
     max_steps: 10
 
   logs:

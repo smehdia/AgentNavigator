@@ -184,6 +184,13 @@ export default function ConfigForm({
           <Field label="Resize Factor">
             <input type="number" step="0.05" className={inputCls} value={config.agent?.settings?.resize_factor ?? 0.75} onChange={(e) => set(["agent", "settings", "resize_factor"], +e.target.value)} />
           </Field>
+          <Field label="Model Thinking (default)">
+            <Toggle
+              label="model_thinking"
+              checked={config.agent?.settings?.model_thinking ?? true}
+              onChange={(v) => set(["agent", "settings", "model_thinking"], v)}
+            />
+          </Field>
           <Field label="Max Steps">
             <input type="number" className={inputCls} value={config.agent?.max_steps ?? 10} onChange={(e) => set(["agent", "max_steps"], +e.target.value)} />
           </Field>

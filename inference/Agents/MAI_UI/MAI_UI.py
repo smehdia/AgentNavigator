@@ -143,6 +143,9 @@ class MAI_UI:
     def reset(self) -> None:
         self._navigation.reset()
 
+    def set_model_thinking(self, enabled: bool) -> None:
+        self._navigation.set_model_thinking(enabled)
+
     def step(
         self,
         instruction: str,

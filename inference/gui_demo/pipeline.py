@@ -592,14 +592,26 @@ def run_navigation_loop(
             stopped = True
             break
 
-        start = time.time()
+        step_start = time.time()
         screenshot = driver.take_screenshot()
+        driver_screenshot_s = time.time() - step_start
+
+        model_start = time.time()
         step_result, _ = agent.step(navigation_memory, screenshot)
+        model_prediction_s = time.time() - model_start
+
+        other_start = time.time()
         parsed_action = parse_action_from_step(step_result)
 
         if should_stop and should_stop():
             stopped = True
             break
+
+        timing = {
+            "driver_screenshot_s": driver_screenshot_s,
+            "model_prediction_s": model_prediction_s,
+            "other_processing_s": time.time() - other_start,
+        }
 
         action_record = {
             "type": parsed_action["type"],
@@ -608,13 +620,15 @@ def run_navigation_loop(
             "start_coordinate": parsed_action.get("start_coordinate"),
             "end_coordinate": parsed_action.get("end_coordinate"),
             "thought": parsed_action["thought"],
+            "timing": timing,
         }
         actions.append(action_record)
 
         step_payload = {
             "step": step_idx + 1,
             "action": action_record,
-            "elapsed_s": time.time() - start,
+            "elapsed_s": time.time() - step_start,
+            "timing": timing,
             "screenshot": screenshot,
             "parsed": parsed_action["parsed"],
         }

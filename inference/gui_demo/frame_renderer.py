@@ -423,14 +423,30 @@ def render_web_step_frame(
     thought = str(action.get("thought", "")).strip()
     action_type = str(action.get("type", "")).strip() or "unknown"
     direction = str(action.get("direction", "")).strip().lower()
+    timing = action.get("timing") or {}
     if action_type in ("scroll", "swipe") and direction in ("up", "down", "left", "right"):
         action_display = f"{action_type} ({direction})"
     else:
         action_display = action_type
 
+    def _fmt_timing(value) -> str:
+        if value is None:
+            return "—"
+        try:
+            return f"{float(value):.2f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    timing_lines = [
+        f"driver screenshot: {_fmt_timing(timing.get('driver_screenshot_s'))} sec",
+        f"model prediction: {_fmt_timing(timing.get('model_prediction_s'))} sec",
+        f"other processing: {_fmt_timing(timing.get('other_processing_s'))} sec",
+    ]
+
     font_step = _load_font(layout.dim(12), bold=True)
     font_mono = _load_font(layout.dim(12), mono=True)
     font_body = _load_font(layout.dim(14))
+    font_timing = _load_font(layout.dim(11), mono=True)
 
     inner_w = layout.inner_width
     shot_max_h = layout.step_shot_max_h
@@ -448,7 +464,8 @@ def render_web_step_frame(
         + layout.dim(10)
         + len(thought_lines) * (_line_height(font_body, draw) + layout.dim(4))
     )
-    total_h = layout.dim(32) + text_block_h + layout.dim(12) + shot_h + layout.dim(32)
+    timing_block_h = layout.dim(12) + len(timing_lines) * (_line_height(font_timing, draw) + layout.dim(2))
+    total_h = layout.dim(32) + text_block_h + layout.dim(12) + shot_h + timing_block_h + layout.dim(32)
 
     canvas = Image.new("RGB", (canvas_width, total_h), COLOR_PAGE_BG_BGR[::-1])
     draw = ImageDraw.Draw(canvas)
@@ -477,6 +494,11 @@ def render_web_step_frame(
     border_canvas = Image.new("RGB", (shot_w + 2 * border, shot_h + 2 * border), COLOR_BORDER_RGB)
     border_canvas.paste(shot_pil, (border, border))
     canvas.paste(border_canvas, (x, y))
+    y += shot_h + layout.dim(12)
+
+    for line in timing_lines:
+        draw.text((x, y), line, font=font_timing, fill=COLOR_MUTED_RGB)
+        y += _line_height(font_timing, draw) + layout.dim(2)
 
     return _pil_to_bgr(canvas)
 

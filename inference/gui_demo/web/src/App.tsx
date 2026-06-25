@@ -56,6 +56,7 @@ export default function App() {
   const [currentQuery, setCurrentQuery] = useState("");
   const [candidatesMsgId, setCandidatesMsgId] = useState<string | null>(null);
   const [resetToStartPage, setResetToStartPage] = useState(true);
+  const [modelThinking, setModelThinking] = useState(true);
 
   const execWsRef = useRef<WebSocket | null>(null);
 
@@ -84,6 +85,10 @@ export default function App() {
     setCurrentQuery("");
     setCandidatesMsgId(null);
   }, []);
+
+  useEffect(() => {
+    setModelThinking(config.agent?.settings?.model_thinking ?? true);
+  }, [config.agent?.settings?.model_thinking]);
 
   useEffect(() => {
     fetchConfigList()
@@ -332,10 +337,17 @@ export default function App() {
     const resetMsg = resetToStartPage
       ? "Starting on-device navigation (resetting to start page first)…"
       : "Starting on-device navigation from current screen…";
-    setChatMessages((m) => [...m, { id: uid(), role: "system", content: resetMsg }]);
+    const thinkingMsg = modelThinking
+      ? "Agent thinking mode is on."
+      : "Agent thinking mode is off (tool_call only).";
+    setChatMessages((m) => [
+      ...m,
+      { id: uid(), role: "system", content: resetMsg },
+      { id: uid(), role: "system", content: thinkingMsg },
+    ]);
 
     try {
-      await executeStart(currentQuery, selectedNodeId ?? undefined, resetToStartPage);
+      await executeStart(currentQuery, selectedNodeId ?? undefined, resetToStartPage, modelThinking);
 
       execWsRef.current?.close();
       const ws = new WebSocket(wsUrl("/ws/execution"));
@@ -353,6 +365,11 @@ export default function App() {
               actionType: data.action_type,
               imageB64: data.screenshot_b64,
               annotatedB64: data.annotated_b64,
+              timing: {
+                driver_screenshot_s: data.driver_screenshot_s,
+                model_prediction_s: data.model_prediction_s,
+                other_processing_s: data.other_processing_s,
+              },
             },
           ]);
           if (data.annotated_b64) {
@@ -460,6 +477,8 @@ export default function App() {
                 selectingNodeId={selectedNodeId}
                 resetToStartPage={resetToStartPage}
                 onResetToStartPageChange={setResetToStartPage}
+                modelThinking={modelThinking}
+                onModelThinkingChange={setModelThinking}
               />
             </div>
             <div className="hidden lg:flex items-center justify-center bg-slate-100 rounded-xl border border-slate-200 overflow-hidden min-h-[280px]">

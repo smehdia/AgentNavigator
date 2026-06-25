@@ -31,7 +31,11 @@ from openai import OpenAI
 from PIL import Image
 
 from .base import BaseAgent
-from .prompt import MAI_MOBILE_SYS_PROMPT, MAI_MOBILE_SYS_PROMPT_ASK_USER_MCP
+from .prompt import (
+    MAI_MOBILE_SYS_PROMPT,
+    MAI_MOBILE_SYS_PROMPT_ASK_USER_MCP,
+    MAI_MOBILE_SYS_PROMPT_NO_THINKING,
+)
 from .unified_memory import TrajStep
 from Agents.utils import pil_to_base64, safe_pil_to_bytes
 
@@ -76,6 +80,10 @@ def parse_tagged_text(text: str) -> Dict[str, Any]:
             "thinking": match.group(1).strip().strip('"'),
             "tool_call": match.group(2).strip().strip('"'),
         }
+    else:
+        tool_only = re.search(r"<tool_call>(.*?)</tool_call>", text, re.DOTALL)
+        if tool_only:
+            result["tool_call"] = tool_only.group(1).strip().strip('"')
 
     # Parse tool_call as JSON
     if result["tool_call"]:
@@ -107,6 +115,8 @@ def parse_action_to_structure_output(text: str) -> Dict[str, Any]:
     results = parse_tagged_text(text)
     thinking = results["thinking"]
     tool_call = results["tool_call"]
+    if not tool_call:
+        raise ValueError("No tool_call found in model output")
     action = tool_call["arguments"]
 
     # Normalize coordinates from SCALE_FACTOR range to [0, 1]
@@ -228,8 +238,28 @@ class MAIUINaivigationAgent(BaseAgent):
         self.temperature = self.runtime_conf["temperature"]
         self.top_k = self.runtime_conf["top_k"]
         self.top_p = self.runtime_conf["top_p"]
-        self.max_tokens = self.runtime_conf["max_tokens"]
         self.history_n = self.runtime_conf["history_n"]
+        self.max_tokens_thinking = int(self.runtime_conf.get("max_tokens", 512))
+        self.max_tokens_no_thinking = int(self.runtime_conf.get("max_tokens_no_thinking", 128))
+        self.model_thinking = bool(self.runtime_conf.get("model_thinking", True))
+        self._apply_model_thinking_settings()
+
+    def _apply_model_thinking_settings(self) -> None:
+        self.max_tokens = (
+            self.max_tokens_thinking if self.model_thinking else self.max_tokens_no_thinking
+        )
+
+    def set_model_thinking(self, enabled: bool) -> None:
+        self.model_thinking = bool(enabled)
+        self._apply_model_thinking_settings()
+
+    def _format_assistant_response(self, thinking: str, tool_call_json: str) -> str:
+        if self.model_thinking:
+            return (
+                f"<thinking>\n{thinking}\n</thinking>\n"
+                f"<tool_call>\n{tool_call_json}\n</tool_call>"
+            )
+        return f"<tool_call>\n{tool_call_json}\n</tool_call>"
 
     @property
     def system_prompt(self) -> str:
@@ -244,8 +274,10 @@ class MAIUINaivigationAgent(BaseAgent):
                 [json.dumps(tool, ensure_ascii=False) for tool in self.mcp_tools]
             )
             return MAI_MOBILE_SYS_PROMPT_ASK_USER_MCP.render(tools=mcp_tools_str)
-        
-        return MAI_MOBILE_SYS_PROMPT
+
+        if self.model_thinking:
+            return MAI_MOBILE_SYS_PROMPT
+        return MAI_MOBILE_SYS_PROMPT_NO_THINKING
 
     @property
     def history_responses(self) -> List[str]:
@@ -287,9 +319,7 @@ class MAIUINaivigationAgent(BaseAgent):
                 "arguments": action_json,
             }
             tool_call_json = json.dumps(tool_call_dict, separators=(",", ":"))
-            history_responses.append(
-                f"<thinking>\n{thinking}\n</thinking>\n<tool_call>\n{tool_call_json}\n</tool_call>"
-            )
+            history_responses.append(self._format_assistant_response(thinking, tool_call_json))
 
         return history_responses
 
@@ -323,7 +353,7 @@ class MAIUINaivigationAgent(BaseAgent):
             "arguments": action_json,
         }
         tool_call_json = json.dumps(tool_call_dict, separators=(",", ":"))
-        return f"<thinking>\n{thinking}\n</thinking>\n<tool_call>\n{tool_call_json}\n</tool_call>"
+        return self._format_assistant_response(thinking, tool_call_json)
 
     def mem2ask_user_response(self, step: TrajStep) -> str:
         return step.ask_user_response

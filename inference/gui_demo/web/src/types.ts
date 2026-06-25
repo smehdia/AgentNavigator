@@ -19,7 +19,12 @@ export interface AppConfig {
     verbose_print?: boolean;
     url?: string;
     model_name?: string;
-    settings?: { history_n?: number; resize_factor?: number };
+    settings?: {
+      history_n?: number;
+      resize_factor?: number;
+      model_thinking?: boolean;
+      max_tokens_no_thinking?: number;
+    };
     max_steps?: number;
   };
   logs?: { root?: string; resume_from_checkpoint?: boolean };
@@ -54,6 +59,12 @@ export interface Candidate {
   screenshot_url: string;
 }
 
+export interface StepTiming {
+  driver_screenshot_s?: number;
+  model_prediction_s?: number;
+  other_processing_s?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system" | "step" | "candidates";
@@ -62,6 +73,7 @@ export interface ChatMessage {
   annotatedB64?: string;
   actionType?: string;
   step?: number;
+  timing?: StepTiming;
   candidates?: Candidate[];
   selectedNodeId?: string;
 }

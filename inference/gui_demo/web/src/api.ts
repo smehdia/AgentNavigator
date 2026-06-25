@@ -71,11 +71,17 @@ export async function fetchNavigationMemory(nodeId: string, query: string): Prom
 export async function executeStart(
   query: string,
   nodeId?: string,
-  resetToStartPage: boolean = true
+  resetToStartPage: boolean = true,
+  modelThinking: boolean = true
 ): Promise<void> {
   await request("/api/execute/start", {
     method: "POST",
-    body: JSON.stringify({ query, node_id: nodeId, reset_to_start_page: resetToStartPage }),
+    body: JSON.stringify({
+      query,
+      node_id: nodeId,
+      reset_to_start_page: resetToStartPage,
+      model_thinking: modelThinking,
+    }),
   });
 }
 

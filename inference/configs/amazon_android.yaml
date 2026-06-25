@@ -26,8 +26,10 @@ default:
     url: "http://10.193.241.177:8090/v1"
     model_name: "mai_ui"
     settings: 
-      history_n: 3
+      history_n: 2
       resize_factor: 0.75
+      model_thinking: true
+      max_tokens_no_thinking: 128
     max_steps: 10
 
   logs:
