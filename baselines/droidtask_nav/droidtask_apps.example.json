@@ -1,0 +1,17 @@
+{
+  "_note": "Example app metadata for the 12 English DroidTask apps (Simple Mobile Tools / AOSP utilities). VERIFY each package + launch activity against the APK versions you actually install (use `adb shell cmd package resolve-activity --brief <package>`). Copy to your own apps json and point DROIDTASK_APPS_JSON at it. 'activity' may be null to launch via the default LAUNCHER intent.",
+  "apps": [
+    {"slug": "applauncher",  "package": "com.simplemobiletools.applauncher",   "activity": null, "display_name": "App Launcher"},
+    {"slug": "calendar",     "package": "com.simplemobiletools.calendar.pro",  "activity": null, "display_name": "Calendar"},
+    {"slug": "camera",       "package": "com.simplemobiletools.camera",        "activity": null, "display_name": "Camera"},
+    {"slug": "clock",        "package": "com.simplemobiletools.clock",         "activity": null, "display_name": "Clock"},
+    {"slug": "contacts",     "package": "com.simplemobiletools.contacts.pro",  "activity": null, "display_name": "Contacts"},
+    {"slug": "dialer",       "package": "com.simplemobiletools.dialer",        "activity": null, "display_name": "Dialer"},
+    {"slug": "filemanager",  "package": "com.simplemobiletools.filemanager.pro","activity": null, "display_name": "File Manager"},
+    {"slug": "gallery",      "package": "com.simplemobiletools.gallery.pro",   "activity": null, "display_name": "Gallery"},
+    {"slug": "musicplayer",  "package": "com.simplemobiletools.musicplayer",   "activity": null, "display_name": "Music Player"},
+    {"slug": "notes",        "package": "com.simplemobiletools.notes.pro",     "activity": null, "display_name": "Notes"},
+    {"slug": "messenger",    "package": "com.simplemobiletools.smsmessenger",  "activity": null, "display_name": "SMS Messenger"},
+    {"slug": "voicerecorder","package": "com.simplemobiletools.voicerecorder", "activity": null, "display_name": "Voice Recorder"}
+  ]
+}

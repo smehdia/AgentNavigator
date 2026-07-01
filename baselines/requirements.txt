@@ -1,0 +1,22 @@
+# Python deps for running the baseline benchmarks (baselines/).
+# Each upstream model may need extra deps from its own requirements — see
+# baselines/external/<model>/ and each baselines/<model>/README.md.
+
+# shared nav runner (_common/nav_benchmark.py) + adapters
+numpy
+opencv-python
+pillow
+requests
+
+# model APIs (judges + VLM backbones; keys come from the environment)
+openai
+dashscope
+
+# device control (GUI-Explorer adapter)
+uiautomator2
+
+# SPA-Bench eval / task tables
+pandas
+
+# config loading (PG-Agent server, misc)
+pyyaml

@@ -1,0 +1,5 @@
+# local config with real paths/keys — never commit
+.env
+# upstream model clones live here but are not vendored
+external/*
+!external/README.md
