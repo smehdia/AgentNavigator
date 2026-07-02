@@ -117,5 +117,6 @@ default:
     vlm_model_name_for_path_intents: 'qwen3.6-plus'
     vlm_model_name_for_node_user_intents: 'qwen3.6-plus'
     vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
+    vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
     use_yibu_api: true

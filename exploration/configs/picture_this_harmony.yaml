@@ -108,6 +108,8 @@ default:
   post_process:
     vlm_model_name_for_node_intents: 'qwen3.6-plus'
     vlm_model_name_for_node_navigation_plans: 'qwen3.5-flash'
+    vlm_model_name_for_agent_thought: 'qwen3.6-flash'
+
     use_yibu_api: true
     vlm_processing_img_size_for_last_screenshot: 1536
     vlm_processing_img_quality_for_last_screenshot: 90
