@@ -4,17 +4,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Baidu"
-    description: "The Baidu App is the flagship mobile product of China's dominant search engine, serving as a comprehensive \"search-plus-feed\" portal."
+    name: "fiCurrency"
+    description: "iCurrency is a currency and exchange rate app that lets users view live forex rates, convert between currencies, track favorite pairs, and access financial market information."
 
   driver:
     device_id: "3AP0224B05003112"
     os_name: "harmony"
-    appPackage: "com.baidu.baiduapp"
+    appPackage: "com.seahub.iCurrency"
     appActivity: "EntryAbility"
+    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the fiCurrency app package (e.g., after navigating away).
     skip_scroll_up_on_reset: true
-    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Baidu app package (e.g., after navigating away).
-    reset_instruction: "Go to the 百度 (Home) tab (left most tab in the bottom navigation bar) if there is an advertisement or pop up close it. On the top bar select Recommended (推荐)."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -102,7 +101,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/baidu_harmony"
+    root: "explored_apps/iCurrency_harmony"
     resume_from_checkpoint: true
 
 

@@ -4,17 +4,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Baidu"
-    description: "The Baidu App is the flagship mobile product of China's dominant search engine, serving as a comprehensive \"search-plus-feed\" portal."
+    name: "ES File Explorer"
+    description: "ES File Explorer is a file manager application that lets users browse, copy, move, delete, and organize files and folders on the device, access local and network storage, and manage downloads and archives."
 
   driver:
     device_id: "3AP0224B05003112"
     os_name: "harmony"
-    appPackage: "com.baidu.baiduapp"
+    appPackage: "com.estrongs.hm.pop"
     appActivity: "EntryAbility"
+    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the ES File Explorer app package (e.g., after navigating away).
     skip_scroll_up_on_reset: true
-    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Baidu app package (e.g., after navigating away).
-    reset_instruction: "Go to the 百度 (Home) tab (left most tab in the bottom navigation bar) if there is an advertisement or pop up close it. On the top bar select Recommended (推荐)."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -102,7 +101,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/baidu_harmony"
+    root: "explored_apps/es_file_explorer_harmony"
     resume_from_checkpoint: true
 
 
