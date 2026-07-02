@@ -525,6 +525,216 @@ def _process_user_intents(node_id, node_level_information, path_intents, vlm_cli
 
 
 
+
+def save_agent_thoughts(nx_graph, node_level_information, edge_level_information, user_intents, vlm_client, configs, dbg):
+    logs_root = configs.logs.root
+    agent_thoughts_path = os.path.join(logs_root, "agent_data.json")
+
+    if os.path.exists(agent_thoughts_path):
+        with open(agent_thoughts_path, "r", encoding="utf-8") as f:
+            agent_thoughts = json.load(f)
+    else:
+        agent_thoughts = {}
+
+    max_workers = int(getattr(configs.post_process, "max_workers", 8) or 8)
+    write_lock = threading.Lock()
+    node_ids = list(nx_graph.nodes())
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _process_agent_thoughts,
+                node_id,
+                node_level_information,
+                edge_level_information,
+                user_intents,
+                vlm_client,
+                logs_root,
+                dbg
+            ): node_id
+            for node_id in node_ids
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures), desc="post-process nodes"):
+            node_id = futures[future]
+            try:
+                result = future.result()
+            except Exception:
+                dbg.log(f"Failed post-process for node {node_id}", color="red")
+                traceback.print_exc()
+                continue
+
+            if result is None:
+                continue
+
+            _, entry = result
+            with write_lock:
+                agent_thoughts[node_id] = entry
+                with open(agent_thoughts_path, "w", encoding="utf-8") as f:
+                    json.dump(agent_thoughts, f, ensure_ascii=False, indent=4)
+
+    return agent_thoughts
+
+def _process_agent_thoughts(node_id, node_level_information, edge_level_information, user_intents, vlm_client, logs_root, dbg):
+    def prepare_path_information(
+        path,
+        node_level_information,
+        edge_level_information):
+
+        trajectory = []
+        for i, node_id in enumerate(path):
+            node_info = node_level_information.get(node_id, {}) or {}
+            trajectory.append({
+                "high_level": node_info.get("high_level", ""),
+                "medium_level": node_info.get("medium_level", ""),
+                "low_level": node_info.get("low_level", ""),
+            })
+            if i < len(path) - 1:
+                edge_key = f"{path[i]}|{path[i + 1]}"
+                edge_info = edge_level_information.get(edge_key, [])
+
+                trajectory.append([
+                    {
+                        "low_level_action_description": item.get(
+                            "low_level_action_description",
+                            "",
+                        ),
+                        "high_level_action_description": item.get(
+                            "high_level_action_description",
+                            "",
+                        ),
+                    }
+                    for item in edge_info
+                    if isinstance(item, dict)
+                ])
+
+        return trajectory
+
+    def trajectory_to_pairs(trajectory, path):
+        pairs = []
+        num_nodes_in_trajectory = (len(trajectory) + 1) // 2
+        i = 0
+        node_idx = 0
+
+        while i < len(trajectory) - 2:
+            n1 = trajectory[i]
+            edge_block = trajectory[i + 1]
+            n2 = trajectory[i + 2]
+
+            edge = edge_block[0]
+
+            node_id_1 = path[node_idx]
+            node_id_2 = path[node_idx + 1]
+
+            pairs.append((n1, edge, n2, node_id_1, node_id_2))
+
+            i += 2
+            node_idx += 1
+
+        return pairs
+
+    def make_mai_ui_data(user_intents_for_the_node, model_output, edge_data, screen_w, screen_h, scale=999, seed=None):
+        import json
+        import random
+
+        rng = random.Random(seed)
+
+        thoughts = model_output["agent_thoughts"]
+
+        if len(user_intents_for_the_node) != len(thoughts):
+            raise ValueError(
+                f"Length mismatch: intents={len(user_intents_for_the_node)}, thoughts={len(thoughts)}"
+            )
+
+        if not edge_data:
+            raise ValueError("edge_data is empty")
+
+        edges = list(edge_data.values())
+        data = []
+
+        for intent, thought in zip(user_intents_for_the_node, thoughts):
+            edge = rng.choice(edges)
+
+            action_type = str(edge.get("type", "")).lower()
+
+            if action_type in {"nav", "click", "tap", "button"}:
+                action = "click"
+            elif action_type in {"scroll", "swipe", "swipe_up"}:
+                action = "swipe_up"
+            elif action_type == "back":
+                action = "back"
+            elif action_type == "wait":
+                action = "wait"
+            else:
+                action = "click"
+
+            args = {"action": action}
+
+            if action in {"click", "swipe_up"}:
+                x1, y1, x2, y2 = edge["boundingBox"]
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+
+                x = round(cx / screen_w * scale)
+                y = round(cy / screen_h * scale)
+
+                x = max(0, min(scale, x))
+                y = max(0, min(scale, y))
+
+                args["coordinate"] = [x, y]
+
+            tool_call = {
+                "name": "mobile_use",
+                "arguments": args,
+            }
+
+            agent_output = (
+                f"<thinking>{thought}</thinking>\n"
+                "<tool_call>\n"
+                f"{json.dumps(tool_call, ensure_ascii=False)}\n"
+                "</tool_call>"
+            )
+
+            data.append(
+                {
+                    "user_instruction": intent,
+                    "agent_output": agent_output,
+                }
+            )
+
+        return data
+
+
+    root_node_ids = [node_id for node_id, node in nx_graph.nodes(data=True) if node.get("is_root", False)]
+
+    paths = []
+    for root in root_node_ids:
+        try:
+            temp_paths = list(nx.all_shortest_paths(nx_graph, source=root, target=node_id))
+            paths.extend(temp_paths)
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pass
+
+    node_data = {}
+    path_intents = {}
+    user_intents_for_the_node = user_intents[node_id]['user_intents']
+    sample_img_to_get_size = cv2.imread(os.path.join(logs_root, "screenshots", f"{node_id}.jpg"))
+    screen_h, screen_w = sample_img_to_get_size.shape[:2]
+    for i, path in enumerate(paths):
+        trajectory = prepare_path_information(path, node_level_information, edge_level_information)
+        pairs = trajectory_to_pairs(trajectory, path)
+        for pair in pairs:
+            node_1_info, edge_info, node2_info, node_id_1, node_id_2 = pair
+            output = vlm_client.get_agent_thought(node_1_info, edge_info, node2_info, user_intents_for_the_node)
+            edge_data = nx_graph.get_edge_data(node_id_1, node_id_2)
+
+            node_data[f"{node_id_1}|{node_id}"] = make_mai_ui_data(user_intents_for_the_node, output, edge_data, screen_w, screen_h)
+
+
+    return node_id, node_data
+
+
+
 def save_navigation_plans(nx_graph, node_level_information, edge_level_information, path_intents, user_intents, vlm_client, configs, dbg):
 
     logs_root = configs.logs.root
@@ -793,5 +1003,8 @@ if __name__ == "__main__":
     dbg.log("Stage 6 User Intents Embedding starting: user_intents.json", color="yellow")
     add_node_embeddings_to_user_intents(configs.logs.root, "node_level_information.json", "user_intents.json", "user_intents.json", "BAAI/bge-m3", 4, 8192)
     dbg.log("Stage 6 User Intents Embedding complete: user_intents.json", color="green")
+    agent_thoughts = save_agent_thoughts(nx_graph, node_level_information, edge_level_information, user_intents, vlm_client, configs, dbg)
+    dbg.log("Stage 7 Agent Thoughts starting: agent_data.json", color="yellow")
+    dbg.log("Stage 7 Agent Thoughts complete: agent_data.json", color="green")
 
 
