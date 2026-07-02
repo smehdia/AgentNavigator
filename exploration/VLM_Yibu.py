@@ -2601,3 +2601,167 @@ class VLM_Yibu:
 
         raise last_error or RuntimeError("VLM call failed after retries")
 
+
+
+    def get_agent_thought(self, node_1_info, edge_info, node2_info, user_intents_for_the_node):
+        system_prompt = """
+    You generate short GUI Agent-style thinking text for mobile UI navigation training in first person.
+
+    Input contains:
+    - current_node: full semantic description of the current screen/page
+    - edge: action information for moving from current_node to next_node
+    - next_node: full semantic description of the next screen/page reached after the edge action
+    - user_intents: user goals associated with the destination/target node
+
+    Task:
+    For each user intent, generate exactly one short internal navigation thought explaining why the edge action is useful for that user intent.
+
+    The thinking will later be wrapped as:
+    <thinking>...</thinking>
+
+    Rules:
+    - Generate thoughts only. Do not generate tool calls, coordinates, actions, JSON tool arguments, or mobile_use calls.
+    - Do not include <thinking> or </thinking> tags.
+    - Output one thought per user intent, in exactly the same order as the input user_intents list.
+    - Do not repeat the user intent in the output.
+    - Use a natural internal navigation-reasoning tone, as if the agent is deciding its next local step.
+    - The wording may vary naturally. It does not always need to start with "I need to" or "I should".
+    - Good tone examples:
+    - "I should open the account area to reach the dashboard-related options."
+    - "Opening the You tab gets me closer to the saved lists section."
+    - "The account area is the right next step for checking gift card details."
+    - "Scrolling down should reveal the lower dashboard sections related to payments."
+    - Do not mention node ids, edge ids, graph, trajectory, path, coordinates, screenshots, or JSON.
+    - Do not describe the full route.
+    - Do not invent pages, controls, or content not supported by the input.
+    - Use the user intent to decide which part of current_node, edge, or next_node is relevant.
+    - The sentence should explain the local next step, not the whole task.
+    - If the edge is a click/tap, explain why using that control helps.
+    - If the edge is a scroll/swipe, explain what relevant content the scroll is expected to reveal.
+    - Do not say the action reaches the final target directly unless next_node clearly contains the requested target content.
+    - If next_node is only intermediate, describe it as a useful waypoint, entry point, account area, section, or gateway.
+    - Keep each thinking sentence concise: ideally 12-30 words.
+    - Avoid uncertain wording like "maybe", "probably", "I think", or "it seems".
+    - Avoid private/person-specific details from the UI. Replace them with generic terms such as "account area", "profile section", "saved list", or "dashboard section".
+    - Return JSON only. Do not add extra fields.
+    """.strip()
+
+        user_prompt = f"""
+    Current node:
+    {json.dumps(node_1_info, ensure_ascii=False, indent=2)}
+
+    Edge action:
+    {json.dumps(edge_info, ensure_ascii=False, indent=2)}
+
+    Next node:
+    {json.dumps(node2_info, ensure_ascii=False, indent=2)}
+
+    User intents, in order:
+    {json.dumps(user_intents_for_the_node, ensure_ascii=False, indent=2)}
+
+    Return exactly:
+
+    {{
+    "agent_thoughts": [
+        "thinking sentence for user_intents[0]",
+        "thinking sentence for user_intents[1]"
+    ]
+    }}
+
+    Important:
+    - agent_thoughts must be a list of strings.
+    - The list length must equal the number of user_intents.
+    - The order must match the input user_intents order exactly.
+    - Do not include user_intent fields.
+    - Do not include <thinking> tags.
+    - Do not include tool_call, coordinates, node ids, graph terms, or full route descriptions.
+    - Do not include markdown or extra text.
+    """.strip()
+
+        messages = [
+            {"role": "system", "content": [{"text": system_prompt}]},
+            {"role": "user", "content": [{"text": user_prompt}]},
+        ]
+
+        model_name = getattr(
+            self.configs.post_process,
+            "vlm_model_name_for_agent_thought")
+
+        max_attempts = int(getattr(self.configs.post_process, "request_retries", 5) or 5)
+        last_error = None
+        response_content = None
+        text = ""
+
+        expected_count = len(user_intents_for_the_node or [])
+
+        for attempt in range(1, max_attempts + 1):
+            response = self._multimodal_conversation_call(
+                model=model_name,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                seed=42,
+                top_p=0.9,
+            )
+
+            try:
+                choices = response.output.choices
+                if not choices:
+                    raise ValueError("VLM response has no choices")
+
+                response_content = choices[0].message.content
+
+                if isinstance(response_content, list):
+                    text = "".join(
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in response_content
+                    ).strip()
+                else:
+                    text = str(response_content or "").strip()
+
+                if not text:
+                    raise ValueError(
+                        "VLM returned empty text content. "
+                        f"raw_content={response_content!r}"
+                    )
+
+                parsed = parse_json_from_model_response(text)
+
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"Parsed response must be a dict, got {type(parsed)}")
+
+                thoughts = parsed.get("agent_thoughts")
+
+                if not isinstance(thoughts, list):
+                    raise ValueError("Response must contain agent_thoughts as a list")
+
+                if len(thoughts) != expected_count:
+                    raise ValueError(
+                        "agent_thoughts length mismatch. "
+                        f"expected={expected_count}, got={len(thoughts)}"
+                    )
+
+                for idx, thinking in enumerate(thoughts):
+                    if not isinstance(thinking, str) or not thinking.strip():
+                        raise ValueError(
+                            f"Invalid thinking at index {idx}: {thinking!r}"
+                        )
+
+                return parsed
+
+            except (ValueError, json.JSONDecodeError, AttributeError, IndexError, TypeError) as exc:
+                last_error = exc
+
+                if attempt < max_attempts:
+                    time.sleep(min(2 ** (attempt - 1), 8))
+                    continue
+
+                raise ValueError(
+                    "Failed to parse agent-thought VLM response.\n"
+                    f"model={model_name}, attempt={attempt}/{max_attempts}\n"
+                    f"raw_content={response_content!r}\n"
+                    f"raw_text={text!r}\n"
+                    f"error={exc}"
+                ) from exc
+
+        raise last_error or RuntimeError("VLM call failed after retries")
