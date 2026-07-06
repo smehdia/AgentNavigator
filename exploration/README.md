@@ -5,7 +5,7 @@ Automated mobile app exploration: vision-language **agents** act on a device, a 
 **Inference preparation is a two-phase pipeline:**
 
 1. **Exploration** (`explore.py`) — grow `graph.json`, per-node screenshots, and `app_graph.pkl` under `logs.root`.
-2. **Post-processing** (`post_process.py`) — read that graph and produce structured artifacts for inference: **node-level page descriptions**, **edge transition hints**, **ranked path intents**, **user intents**, **navigation plans**, and **BGE-M3 retrieval embeddings** (`user_intents.json`, `node_navigation_plans.json`, and intermediate JSON files under the same `logs.root`).
+2. **Post-processing** (`post_process.py`) — read that graph and produce structured artifacts for inference: **node-level page descriptions**, **edge transition hints**, **ranked path intents**, **user intents**, **navigation plans**, **BGE-M3 retrieval embeddings**, and **MAI-UI fine-tuning samples** (`user_intents.json`, `node_navigation_plans.json`, `agent_data.json`, and intermediate JSON files under the same `logs.root`).
 
 You need a completed exploration run (same `logs.root` as in your YAML) before post-processing. Post-processing does not drive the device.
 
@@ -269,7 +269,7 @@ Direct Python:
 python -u post_process.py --config configs/clock_android.yaml
 ```
 
-**Output:** `{logs.root}/user_intents.json` (with embeddings), `{logs.root}/node_navigation_plans.json`, plus intermediate files (`node_level_information.json`, `edge_level_information.json`, `path_intents.json`) and `{logs.root}/post_process.log` when using the shell wrapper.
+**Output:** `{logs.root}/user_intents.json` (with embeddings), `{logs.root}/node_navigation_plans.json`, `{logs.root}/agent_data.json`, plus intermediate files (`node_level_information.json`, `edge_level_information.json`, `path_intents.json`) and `{logs.root}/post_process.log` when using the shell wrapper.
 
 Detail: [Post-processing](#post-processing-post_processpy).
 
@@ -277,9 +277,9 @@ Detail: [Post-processing](#post-processing-post_processpy).
 
 ## Post-processing (`post_process.py`)
 
-Turns an explored **app graph** into page descriptions, transition metadata, path rankings, user intents, navigation plans, and retrieval embeddings for downstream inference.
+Turns an explored **app graph** into page descriptions, transition metadata, path rankings, user intents, navigation plans, retrieval embeddings, and MAI-UI training pairs for downstream inference and fine-tuning.
 
-`post_process.py` runs **six VLM stages** plus **one embedding stage** in order. Each stage writes a JSON checkpoint under `logs.root` so you can resume or re-run later stages only (see commented calls in the `__main__` block).
+`post_process.py` runs **seven VLM stages** plus **one embedding stage** in order. Each stage writes a JSON checkpoint under `logs.root` so you can resume or re-run later stages only (see commented calls in the `__main__` block).
 
 | Stage | Function | Output file | VLM call |
 |-------|----------|-------------|----------|
@@ -289,6 +289,7 @@ Turns an explored **app graph** into page descriptions, transition metadata, pat
 | **4** | `save_user_intents` | `user_intents.json` | `get_node_user_intents` — **text-only** natural-language intents for the current screen |
 | **5** | `save_navigation_plans` | `node_navigation_plans.json` | `get_navigation_plan` — one hint per hop; collapses parallel `alternative_actions` |
 | **6** | `add_node_embeddings_to_user_intents` | `user_intents.json` (in place) | **BGE-M3** locally — one dense vector per node for retrieval |
+| **7** | `save_agent_thoughts` | `agent_data.json` | `get_agent_thought` per path hop + `make_mai_ui_data` — MAI-UI `<thinking>` / `<tool_call>` training pairs |
 
 Uses `configs.post_process.use_yibu_api` to choose `VLM_Yibu` vs `VLM` (independent from `vlm.use_yibu_api` during exploration).
 
@@ -310,12 +311,16 @@ flowchart TB
   subgraph embed["Retrieval index"]
     BGE[BGE-M3 encode PAGE_DESCRIPTION + USER_INTENTS]
   end
+  subgraph train["MAI-UI training data"]
+    AT[get_agent_thought + make_mai_ui_data]
+  end
   subgraph out["Outputs"]
     J1[node_level_information.json]
     J2[edge_level_information.json]
     J3[path_intents.json]
     J4[user_intents.json]
     J5[node_navigation_plans.json]
+    J6[agent_data.json]
   end
   G --> NL
   S --> NL
@@ -338,6 +343,11 @@ flowchart TB
   J1 --> BGE
   J4 --> BGE
   BGE --> J4
+  J1 --> AT
+  J2 --> AT
+  J4 --> AT
+  G --> AT
+  AT --> J6
 ```
 
 ### Stage details
@@ -447,6 +457,107 @@ The VLM (`get_navigation_plan`) must produce **one plan per input path** with:
 - Encodes with **BGE-M3**, L2-normalizes, writes `embedding` + `embedding_text` back into **`user_intents.json`**.
 - Navigation plans are **not** embedded — only node-level text is used for stage-1 retrieval in inference.
 
+**Stage 7 — MAI-UI agent thoughts (`save_agent_thoughts` / `_process_agent_thoughts`)**
+
+Stage 7 builds **supervised training pairs** for the on-device MAI-UI agent: a natural-language user command, the **current-screen screenshot** (at inference / fine-tune time), and an assistant reply in MAI-UI format (`<thinking>…</thinking>` + `<tool_call>…</tool_call>`).
+
+This stage runs **after** Stages 1–6 so it can reuse `node_level_information.json`, `edge_level_information.json`, and `user_intents.json`.
+
+#### Per-target-node loop
+
+For each graph node `node_id` (the **destination screen** being processed):
+
+1. Load **`user_intents[node_id].user_intents`** — natural-language goals for that screen (from Stage 4).
+2. Enumerate **all shortest paths** from every `is_root: true` node to `node_id` (same path enumeration as Stage 3).
+3. For each path, build an alternating trajectory with `prepare_path_information`:
+   - **Page blocks** — `{high_level, medium_level, low_level}` from `node_level_information`.
+   - **Edge blocks** — lists of `{low_level_action_description, high_level_action_description}` from `edge_level_information` under key `source|target`.
+4. Split the trajectory into **hop pairs** with `trajectory_to_pairs`:
+   - Each pair is `(current_page, edge_action, next_page, node_id_1, node_id_2)`.
+   - Only the **first** action cluster in each edge block is used (`edge_block[0]`).
+
+#### VLM thought generation (`get_agent_thought`)
+
+For every hop pair along every path to `node_id`, call **`get_agent_thought`** (`VLM` / `VLM_Yibu`, model: `vlm_model_name_for_agent_thought`):
+
+| Input | Source |
+|-------|--------|
+| `node_1_info` | Page description of the **current** screen on this hop |
+| `edge_info` | First transition hint for `node_id_1 → node_id_2` |
+| `node2_info` | Page description of the **next** screen after the action |
+| `user_intents_for_the_node` | Full `user_intents` list for the **destination** `node_id` (not re-scoped per hop) |
+
+The VLM returns:
+
+```json
+{
+  "agent_thoughts": [
+    "I should open the account area to reach the dashboard-related options.",
+    "Opening the You tab gets me closer to the saved lists section."
+  ]
+}
+```
+
+One thought per user intent, same order and count as the input list. Thoughts are **text only** — no coordinates, tool JSON, or `<thinking>` tags (those are added in the next step). The prompt asks for short first-person navigation reasoning (12–30 words) explaining why **this local edge** helps toward each user goal.
+
+#### MAI-UI sample assembly (`make_mai_ui_data`)
+
+`make_mai_ui_data` turns VLM thoughts + graph edge metadata into fine-tuning rows:
+
+1. **Zip** each `(user_intent, thought)` pair.
+2. **Pick a parallel edge** from `nx_graph.get_edge_data(node_id_1, node_id_2)` at random (when multiple edges exist between the same pair).
+3. **Map graph action type** → MAI-UI action:
+   - `nav` / `click` / `tap` / `button` → `click`
+   - `scroll` / `swipe` / `swipe_up` → `swipe_up`
+   - `back` → `back`
+   - `wait` → `wait`
+   - default → `click`
+4. For `click` / `swipe_up`, compute **normalized coordinates** on a `0..999` grid from the edge `boundingBox` center and the screenshot size of `node_id` (destination node).
+5. Build **`agent_output`**:
+
+```text
+<thinking>I should open the account area to reach the dashboard-related options.</thinking>
+<tool_call>
+{"name": "mobile_use", "arguments": {"action": "click", "coordinate": [512, 834]}}
+</tool_call>
+```
+
+6. Append one training row per intent:
+
+```json
+{
+  "user_instruction": "Navigate to the page where I can see my order history.",
+  "agent_output": "<thinking>…</thinking>\n<tool_call>\n{…}\n</tool_call>"
+}
+```
+
+#### Output layout (`agent_data.json`)
+
+Results are keyed by **destination node**, then by **hop key** `source_on_path|destination_node`:
+
+```json
+{
+  "target_node_id": {
+    "hop_source|target_node_id": [
+      {
+        "user_instruction": "Navigate to the page where I can see my order history.",
+        "agent_output": "<thinking>…</thinking>\n<tool_call>\n{\"name\": \"mobile_use\", \"arguments\": {\"action\": \"click\", \"coordinate\": [512, 834]}}\n</tool_call>"
+      }
+    ]
+  }
+}
+```
+
+- **`user_instruction`** — one of the destination screen's user intents.
+- **`agent_output`** — MAI-UI-compatible assistant text for that hop.
+- At fine-tune time (`fine_tune/prepare_data.py`), each row is paired with the **current-hop screenshot** `screenshots/{node_id_1}.jpg` to build full multimodal chat samples.
+
+#### Design notes
+
+- Thoughts are generated **per hop** along paths to a target, but always conditioned on the **target screen's** user intents — the model learns local next-step reasoning toward goals associated with the destination page.
+- Parallel graph edges supply **grounding coordinates**; the VLM only writes reasoning text.
+- If multiple paths share the same `(hop_source, target_node_id)` key, later paths **overwrite** earlier entries in `agent_data.json`.
+
 ### Output schema (inference-facing)
 
 **`user_intents.json`** (Stages 4 + 6)
@@ -477,6 +588,23 @@ The VLM (`get_navigation_plan`) must produce **one plan per input path** with:
 
 **`node_navigation_plans.json`** (Stage 5) — see example above. Each value is a **list of plan objects**, not a nested `ui_navigation_memory` wrapper.
 
+**`agent_data.json`** (Stage 7)
+
+```json
+{
+  "target_node_id": {
+    "hop_source|target_node_id": [
+      {
+        "user_instruction": "Navigate to the page where I can see my order history.",
+        "agent_output": "<thinking>I should open the account area to reach order-related options.</thinking>\n<tool_call>\n{\"name\": \"mobile_use\", \"arguments\": {\"action\": \"click\", \"coordinate\": [512, 834]}}\n</tool_call>"
+      }
+    ]
+  }
+}
+```
+
+Used by `fine_tune/prepare_data.py` to build multimodal MAI-UI SFT samples (system prompt + user instruction + screenshot + assistant output).
+
 | Field | Stage | Notes |
 |-------|-------|-------|
 | `high_level` / `medium_level` / `low_level` | 1 | Per-node page description; used in reranking and nav-plan input |
@@ -485,6 +613,7 @@ The VLM (`get_navigation_plan`) must produce **one plan per input path** with:
 | `user_intents` | 4 | Natural-language navigation commands for the target screen |
 | plan list | 5 | `relevant_waypoint_sequence` (≤ L−1) + `transition_hints` (≤ L−1, one `{high_level, low_level}` object per hop) |
 | `embedding_text`, `embedding` | 6 | One vector per node for cosine retrieval |
+| `user_instruction`, `agent_output` | 7 | MAI-UI SFT pair per hop × user intent; keyed by `source|target_node` under each destination node |
 
 ### Run via `run_post_process.sh`
 
@@ -512,6 +641,7 @@ post_process:
   vlm_model_name_for_path_intents: 'qwen3.6-plus'
   vlm_model_name_for_node_user_intents: 'qwen3.6-plus'
   vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
+  vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
   use_yibu_api: true
 ```
@@ -528,7 +658,8 @@ post_process:
 | `vlm_model_name_for_path_intents` | Stage 3 | Path scoring + `get_top_paths` rerank |
 | `vlm_model_name_for_node_user_intents` | Stage 4 | Text-only user intent generation |
 | `vlm_model_name_for_navigation_plan` | Stage 5 | Text-only navigation plan generation |
-| `max_workers` | Stages 1–5 | Thread pool size for parallel node/edge jobs |
+| `vlm_model_name_for_agent_thought` | Stage 7 | Text-only MAI-UI thinking generation (`get_agent_thought`) |
+| `max_workers` | Stages 1–7 | Thread pool size for parallel node/edge jobs |
 
 Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use the post-process VLM.
 
@@ -543,6 +674,7 @@ Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use t
 | `path_intents.json` | Top paths per node with goals and reliability scores |
 | `user_intents.json` | Per-node `user_intents`, plus `embedding_text` + `embedding` after Stage 6 |
 | `node_navigation_plans.json` | Per-node **list** of plans (`relevant_waypoint_sequence`, `transition_hints` with one hint per hop) |
+| `agent_data.json` | Per destination node: MAI-UI `user_instruction` / `agent_output` pairs keyed by `hop_source|target_node` |
 | `post_process.log` | Console log when using `run_post_process.sh` |
 
 ### Preparing an app for inference (checklist)
@@ -550,8 +682,9 @@ Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use t
 1. **Device + config** — create YAML with `driver`, `agent`, `vlm`, `graph`, `logs`, `post_process`; set **`use_launcher_intent: true`** when needed; run [Driver preflight (`check_driver.py`)](#driver-preflight-check_driverpy).
 2. **Explore** — `CONFIG=configs/your_app.yaml ./run_explore.sh` until the graph is large enough.
 3. **Confirm artifacts** — under `logs.root`: `graph.json`, `screenshots/*.jpg`, `app_graph.pkl`.
-4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → full artifact set above.
+4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → full artifact set above (including `agent_data.json` for MAI-UI fine-tuning).
 5. **Downstream inference** — cosine-search `embedding` in `user_intents.json`, VLM-rerank with page descriptions, replay routes from `node_navigation_plans.json`.
+6. **Optional fine-tuning** — `fine_tune/prepare_data.py` reads `agent_data.json` + screenshots to build MAI-UI SFT chat samples.
 
 ---
 
@@ -653,7 +786,7 @@ Graph/
 explore.py                  # CLI entry: --config, exploration loop, logs_num_walks_nodes, plot_nodes_vs_walk → num_nodes_vs_walk.png
 check_driver.py             # interactive driver preflight: launch, reset_to_start_page, foreground loop
 run_explore.sh              # optional wrapper: tee console log to logs.root/explore.log
-post_process.py             # CLI: 6 VLM stages + BGE-M3 embeddings → user_intents.json, node_navigation_plans.json, …
+post_process.py             # CLI: 7 VLM stages + BGE-M3 embeddings → user_intents.json, node_navigation_plans.json, agent_data.json, …
 run_post_process.sh         # wrapper: tee console log to logs.root/post_process.log
 VLM.py                      # DashScope multimodal + embeddings
 VLM_Yibu.py                 # Yibu multimodal (OpenAI-compatible); embeddings still DashScope
@@ -1365,6 +1498,7 @@ Outputs under `logs.root` (e.g. `explored_apps/clock/`):
 | `interactive_node_graph.html` | Visual graph explorer |
 | `user_intents.json` | Post-processing Stages 4+6: `user_intents`, `embedding_text`, `embedding` |
 | `node_navigation_plans.json` | Post-processing Stage 5: per-node list of plans (≤ L−1 waypoints and hints per path) |
+| `agent_data.json` | Post-processing Stage 7: MAI-UI `user_instruction` / `agent_output` pairs for fine-tuning |
 | `post_process.log` | Console stdout/stderr when using `run_post_process.sh` |
 
 ### Exploration progress plot
@@ -2038,7 +2172,7 @@ If the agent keeps conversation state:
 | `explore.py` | CLI (`--config`), `VLM` vs `VLM_Yibu` from `vlm.use_yibu_api`, schedule depth, mode selection, `load_or_create_app_graph`, resume, per-walk export, `plot_nodes_vs_walk` / `num_nodes_vs_walk.png` |
 | `check_driver.py` | Interactive driver preflight (`--config`): `run_application`, `reset_to_start_page`, foreground loop — run before `explore.py`; verify `use_launcher_intent` when `am start -n` fails — see [Driver preflight](#driver-preflight-check_driverpy) |
 | `run_explore.sh` | Run `explore.py` with `CONFIG=...`; tee log to `{logs.root}/explore.log` — see [How to run](#how-to-run) |
-| `post_process.py` | Stages 1–5: node/edge/path/user intents + navigation plans; Stage 6: BGE-M3 → `user_intents.json` |
+| `post_process.py` | Stages 1–5: node/edge/path/user intents + navigation plans; Stage 6: BGE-M3 → `user_intents.json`; Stage 7: MAI-UI thoughts → `agent_data.json` |
 | `run_post_process.sh` | Run `post_process.py` with `CONFIG=...`; tee log to `{logs.root}/post_process.log` — see [Post-processing](#post-processing-post_processpy) |
 | `Graph/AppGraph.py` | NetworkX graph, `add_node` / `add_edge`, JSON + pickle export; `logs_num_walks_nodes` for progress plot |
 | `Graph/Node.py` | Screen node creation, VLM elements, `refresh_elements`, `backtracking_action` |
