@@ -1,6 +1,12 @@
-# Fine-tuning data preparation
+# Fine-tuning
 
-`prepare_data.py` converts post-processed exploration artifacts into MAI-UI SFT chat samples (JSONL). Each row is a multimodal conversation: system prompt, user instruction, screenshot, and assistant response (`<thinking>` + `<tool_call>`).
+Scripts in this directory turn post-processed exploration artifacts into a deployable MAI-UI model:
+
+```
+post_process → prepare_data.py → train_lora.py → merge_model_for_deployment.py → vLLM
+```
+
+`prepare_data.py` converts exploration artifacts into MAI-UI SFT chat samples (JSONL). Each row is a multimodal conversation: system prompt, user instruction, screenshot, and assistant response (`<thinking>` + `<tool_call>`).
 
 ## Usage
 
@@ -288,4 +294,45 @@ cd exploration && CONFIG=configs/amazon_android.yaml ./run_post_process.sh
 
 # 3. Prepare fine-tuning data
 python fine_tune/prepare_data.py --root exploration/explored_apps/amazon
+
+# 4. Train QLoRA adapter
+python fine_tune/train_lora.py \
+  --data exploration/explored_apps/amazon/training_data.jsonl \
+  --output_dir ./mai-ui-qlora
+
+# 5. Merge base model + adapter for vLLM
+python fine_tune/merge_model_for_deployment.py \
+  --base_model fine_tune/MAI-UI-2B \
+  --adapter_path ./mai-ui-qlora \
+  --output_dir ./mai-ui-merged
 ```
+
+---
+
+## Merge for deployment (`merge_model_for_deployment.py`)
+
+`train_lora.py` saves a **LoRA adapter** (not a full model). Before serving with vLLM, merge the adapter into the base weights:
+
+```bash
+python fine_tune/merge_model_for_deployment.py \
+  --base_model fine_tune/MAI-UI-2B \
+  --adapter_path ./mai-ui-qlora \
+  --output_dir ./mai-ui-merged
+```
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--base_model` | `fine_tune/MAI-UI-2B` | Base model path or HuggingFace id |
+| `--adapter_path` | *(required)* | LoRA output directory from `train_lora.py` |
+| `--output_dir` | *(required)* | Where to write the merged full-precision checkpoint |
+| `--dtype` | `bf16` | Merged weight dtype: `bf16`, `fp16`, or `fp32` |
+
+The script loads the base `Qwen3VLForConditionalGeneration` in full precision, applies the LoRA weights with `merge_and_unload()`, and writes a HuggingFace checkpoint (weights + processor) suitable for vLLM.
+
+Serve the merged model:
+
+```bash
+vllm serve ./mai-ui-merged --dtype bfloat16
+```
+
+Point `agent.url` in your inference config at this vLLM endpoint (see `inference/README.md` for MAI-UI server notes).
