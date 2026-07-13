@@ -110,6 +110,35 @@ class VLM:
         self.debugger = debugger
         self.configs = configs
 
+    def _extract_token_usage_from_response(self, resp):
+        """Return (image_input_tokens, text_input_tokens, output_tokens), defaulting to 0 when unavailable."""
+        usage = getattr(resp, "usage", None)
+        image_input_tokens = 0
+        text_input_tokens = 0
+        output_tokens = 0
+
+        if usage is None:
+            print("input_tokens_details was not found: resp.usage is None")
+            return image_input_tokens, text_input_tokens, output_tokens
+
+        details = getattr(usage, "input_tokens_details", None)
+        if details is None:
+            print("input_tokens_details was not found")
+        elif isinstance(details, dict):
+            image_input_tokens = details.get("image_tokens", 0)
+            text_input_tokens = details.get("text_tokens", 0)
+        else:
+            image_input_tokens = getattr(details, "image_tokens", 0)
+            text_input_tokens = getattr(details, "text_tokens", 0)
+
+        out_details = getattr(usage, "output_tokens_details", None)
+        if out_details is not None:
+            if isinstance(out_details, dict):
+                output_tokens = out_details.get("text_tokens", 0)
+            else:
+                output_tokens = getattr(out_details, "text_tokens", 0)
+
+        return image_input_tokens, text_input_tokens, output_tokens
 
     def extract_elements_from_page(self, screenshot, application_description="", action_history=None):
         """
@@ -280,9 +309,7 @@ class VLM:
             seed=42
         )
 
-        image_input_tokens = resp.usage.input_tokens_details['image_tokens']
-        text_input_tokens = resp.usage.input_tokens_details['text_tokens']
-        output_tokens = resp.usage.output_tokens_details['text_tokens']
+        image_input_tokens, text_input_tokens, output_tokens = self._extract_token_usage_from_response(resp)
 
         if self.configs.vlm.model_name_for_elements_extraction in self.token_usage_details.keys():
             self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction]["image_input_tokens"] += image_input_tokens
@@ -608,9 +635,7 @@ class VLM:
             seed=42,
         )
 
-        image_input_tokens = resp.usage.input_tokens_details["image_tokens"]
-        text_input_tokens = resp.usage.input_tokens_details["text_tokens"]
-        output_tokens = resp.usage.output_tokens_details["text_tokens"]
+        image_input_tokens, text_input_tokens, output_tokens = self._extract_token_usage_from_response(resp)
 
         model_name = self.configs.vlm.model_name_for_page_summary
 
@@ -1091,8 +1116,7 @@ class VLM:
             max_tokens=max(192, top_k * 96 + 32),
         )
 
-        text_input_tokens = response.usage.input_tokens_details['text_tokens']
-        output_tokens = response.usage.output_tokens_details['text_tokens']
+        _, text_input_tokens, output_tokens = self._extract_token_usage_from_response(response)
 
         if self.configs.vlm.model_name_for_elements_extraction in self.token_usage_details.keys():
             self.token_usage_details[self.configs.vlm.model_name_for_elements_extraction]["text_input_tokens"] += text_input_tokens
@@ -1177,8 +1201,7 @@ class VLM:
             seed=42,
         )
 
-        text_input_tokens = response.usage.input_tokens_details["text_tokens"]
-        output_tokens = response.usage.output_tokens_details["text_tokens"]
+        _, text_input_tokens, output_tokens = self._extract_token_usage_from_response(response)
 
         usage_key = self.configs.graph.exploration_modes.model_llm_bfs.model_name
 
@@ -2030,6 +2053,16 @@ class VLM:
     - Return JSON only. Do not add extra fields.
     """.strip()
 
+        intent_count = len(user_intents_for_the_node or [])
+        example_thoughts = ",\n        ".join(
+            f'"thinking sentence for user_intents[{i}]"' for i in range(intent_count)
+        )
+        example_json = (
+            '{\n    "agent_thoughts": [\n        '
+            + example_thoughts
+            + "\n    ]\n}"
+        )
+
         user_prompt = f"""
     Current node:
     {json.dumps(node_1_info, ensure_ascii=False, indent=2)}
@@ -2045,12 +2078,7 @@ class VLM:
 
     Return exactly:
 
-    {{
-    "agent_thoughts": [
-        "thinking sentence for user_intents[0]",
-        "thinking sentence for user_intents[1]"
-    ]
-    }}
+    {example_json}
 
     Important:
     - agent_thoughts must be a list of strings.

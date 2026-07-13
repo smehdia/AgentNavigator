@@ -2646,6 +2646,16 @@ class VLM_Yibu:
     - Return JSON only. Do not add extra fields.
     """.strip()
 
+        intent_count = len(user_intents_for_the_node or [])
+        example_thoughts = ",\n        ".join(
+            f'"thinking sentence for user_intents[{i}]"' for i in range(intent_count)
+        )
+        example_json = (
+            '{\n    "agent_thoughts": [\n        '
+            + example_thoughts
+            + "\n    ]\n}"
+        )
+
         user_prompt = f"""
     Current node:
     {json.dumps(node_1_info, ensure_ascii=False, indent=2)}
@@ -2661,12 +2671,7 @@ class VLM_Yibu:
 
     Return exactly:
 
-    {{
-    "agent_thoughts": [
-        "thinking sentence for user_intents[0]",
-        "thinking sentence for user_intents[1]"
-    ]
-    }}
+    {example_json}
 
     Important:
     - agent_thoughts must be a list of strings.
