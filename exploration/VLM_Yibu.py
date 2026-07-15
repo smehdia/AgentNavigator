@@ -226,6 +226,51 @@ class VLM_Yibu:
             )
             set_log_dir(log_dir)
 
+    def _extract_token_usage_from_response(self, resp):
+        """Return (image_input_tokens, text_input_tokens, output_tokens), defaulting to 0 when unavailable."""
+        usage = getattr(resp, "usage", None)
+        image_input_tokens = 0
+        text_input_tokens = 0
+        output_tokens = 0
+
+        if usage is None:
+            print("input_tokens_details was not found: resp.usage is None")
+            return image_input_tokens, text_input_tokens, output_tokens
+
+        details = getattr(usage, "input_tokens_details", None)
+        if details is None:
+            print("input_tokens_details was not found")
+        elif isinstance(details, dict):
+            image_input_tokens = details.get("image_tokens", 0)
+            text_input_tokens = details.get("text_tokens", 0)
+        else:
+            image_input_tokens = getattr(details, "image_tokens", 0)
+            text_input_tokens = getattr(details, "text_tokens", 0)
+
+        out_details = getattr(usage, "output_tokens_details", None)
+        if out_details is not None:
+            if isinstance(out_details, dict):
+                output_tokens = out_details.get("text_tokens", 0)
+            else:
+                output_tokens = getattr(out_details, "text_tokens", 0)
+
+        return image_input_tokens, text_input_tokens, output_tokens
+
+    def _get_message_content_from_response(self, resp):
+        output = getattr(resp, "output", None)
+        if output is None:
+            print(output)
+            return None
+        choices = getattr(output, "choices", None)
+        if not choices:
+            print(output)
+            return None
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            print(output)
+            return None
+        return getattr(message, "content", None)
+
     def _post_process_model_for_node_intents(self) -> str:
         post_process = self.configs.post_process
         model = (
@@ -738,16 +783,7 @@ class VLM_Yibu:
             seed=42
         )
 
-        try:
-            image_input_tokens = resp.usage.input_tokens_details['image_tokens']
-            text_input_tokens = resp.usage.input_tokens_details['text_tokens']
-            output_tokens = resp.usage.output_tokens_details['text_tokens']
-        except Exception as e:
-            print(f"Error getting usage details: {e}")
-            image_input_tokens = 0
-            text_input_tokens = 0
-            output_tokens = 0
-
+        image_input_tokens, text_input_tokens, output_tokens = self._extract_token_usage_from_response(resp)
 
         model_key = self.configs.vlm.model_name_for_elements_extraction
         if model_key not in self.token_usage_details:
@@ -766,12 +802,16 @@ class VLM_Yibu:
             self.token_usage_details[model_key][k] += v
    
 
-        raw = resp.output.choices[0].message.content
+        raw = self._get_message_content_from_response(resp)
         raw_text = (
             "".join(chunk.get("text", "") if isinstance(chunk, dict) else str(chunk) for chunk in raw).strip()
-            if isinstance(raw, list) else str(raw).strip()
+            if isinstance(raw, list) else str(raw or "").strip()
         )
-        elements = (parse_json_from_model_response(raw_text) or {}).get("elements", [])
+        if not raw_text:
+            print("VLM returned empty text for element extraction; using empty elements list")
+            elements = []
+        else:
+            elements = (parse_json_from_model_response(raw_text) or {}).get("elements", [])
         H0, W0 = screenshot.shape[:2]
         pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
 

@@ -140,6 +140,21 @@ class VLM:
 
         return image_input_tokens, text_input_tokens, output_tokens
 
+    def _get_message_content_from_response(self, resp):
+        output = getattr(resp, "output", None)
+        if output is None:
+            print(output)
+            return None
+        choices = getattr(output, "choices", None)
+        if not choices:
+            print(output)
+            return None
+        message = getattr(choices[0], "message", None)
+        if message is None:
+            print(output)
+            return None
+        return getattr(message, "content", None)
+
     def extract_elements_from_page(self, screenshot, application_description="", action_history=None):
         """
         Extract actionable UI elements from a screenshot.
@@ -322,12 +337,16 @@ class VLM:
                 "output_tokens": output_tokens
             }
 
-        raw = resp.output.choices[0].message.content
+        raw = self._get_message_content_from_response(resp)
         raw_text = (
             "".join(chunk.get("text", "") if isinstance(chunk, dict) else str(chunk) for chunk in raw).strip()
-            if isinstance(raw, list) else str(raw).strip()
+            if isinstance(raw, list) else str(raw or "").strip()
         )
-        elements = (parse_json_from_model_response(raw_text) or {}).get("elements", [])
+        if not raw_text:
+            print("VLM returned empty text for element extraction; using empty elements list")
+            elements = []
+        else:
+            elements = (parse_json_from_model_response(raw_text) or {}).get("elements", [])
         H0, W0 = screenshot.shape[:2]
         pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
 
@@ -650,7 +669,7 @@ class VLM:
                 "output_tokens": output_tokens,
             }
 
-        raw = resp.output.choices[0].message.content
+        raw = self._get_message_content_from_response(resp)
 
         if isinstance(raw, list):
             raw_text = "".join(
@@ -658,9 +677,9 @@ class VLM:
                 for chunk in raw
             ).strip()
         else:
-            raw_text = str(raw).strip()
+            raw_text = str(raw or "").strip()
 
-        content = parse_json_from_model_response(raw_text)
+        content = parse_json_from_model_response(raw_text) or {}
 
         active_tab = content.get("active_tab")
         active_subtab = content.get("active_subtab")
@@ -903,14 +922,14 @@ class VLM:
                     "output_tokens": output_tokens,
                 }
 
-        raw = resp.output.choices[0].message.content
+        raw = self._get_message_content_from_response(resp)
         raw_text = (
             "".join(
                 chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
                 for chunk in raw
             ).strip()
             if isinstance(raw, list)
-            else str(raw).strip()
+            else str(raw or "").strip()
         )
 
 
