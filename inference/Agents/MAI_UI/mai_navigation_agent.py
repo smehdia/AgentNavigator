@@ -45,6 +45,31 @@ SCALE_FACTOR = 999
 log = logging.getLogger(__name__)
 
 
+def format_messages_as_prompt(messages: List[Dict[str, Any]]) -> str:
+    """Render chat messages as a readable prompt string for debugging/UI."""
+    lines: List[str] = []
+    for msg in messages:
+        role = str(msg.get("role", "unknown")).upper()
+        lines.append(f"[{role}]")
+        content = msg.get("content")
+        if isinstance(content, str):
+            if content:
+                lines.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = part.get("type")
+                if part_type == "text":
+                    text = str(part.get("text", "") or "").strip()
+                    if text:
+                        lines.append(text)
+                elif part_type == "image_url":
+                    lines.append("[image]")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def parse_tagged_text(text: str) -> Dict[str, Any]:
     """
     Parse text containing XML-style tags to extract thinking and tool_call content.
@@ -242,6 +267,7 @@ class MAIUINaivigationAgent(BaseAgent):
         self.max_tokens_thinking = int(self.runtime_conf.get("max_tokens", 512))
         self.max_tokens_no_thinking = int(self.runtime_conf.get("max_tokens_no_thinking", 128))
         self.model_thinking = bool(self.runtime_conf.get("model_thinking", True))
+        self.last_prompt = ""
         self._apply_model_thinking_settings()
 
     def _apply_model_thinking_settings(self) -> None:
@@ -535,6 +561,7 @@ class MAIUINaivigationAgent(BaseAgent):
 
         # Build messages
         messages = self._build_messages(instruction, images)
+        self.last_prompt = format_messages_as_prompt(messages)
 
         # Make API call with retry logic
         max_retries = 3
@@ -598,6 +625,7 @@ class MAIUINaivigationAgent(BaseAgent):
         Args:
             runtime_logger: Optional logger (unused, kept for API compatibility).
         """
+        self.last_prompt = ""
         super().reset()
 
 

@@ -143,6 +143,10 @@ class MAI_UI:
     def reset(self) -> None:
         self._navigation.reset()
 
+    @property
+    def last_prompt(self) -> str:
+        return str(getattr(self._navigation, "last_prompt", "") or "")
+
     def set_model_thinking(self, enabled: bool) -> None:
         self._navigation.set_model_thinking(enabled)
 

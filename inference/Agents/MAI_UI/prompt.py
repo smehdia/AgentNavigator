@@ -73,8 +73,6 @@ For each function call, return a json object with function name and arguments wi
 
 
 ## Note
-- Available Apps: `["Camera","Chrome","Clock","Contacts","Dialer","Files","Settings","Markor","Tasks","Simple Draw Pro","Simple Gallery Pro","Simple SMS Messenger","Audio Recorder","Pro Expense","Broccoli APP","OSMand","VLC","Joplin","Retro Music","OpenTracks","Simple Calendar Pro"]`.
-You should use the `open` action to open the app as possible as you can, because it is the fast way to open the app.
 - You must follow the Action Space strictly, and return the correct json object within <tool_call></tool_call> XML tags.
 """.strip()
 
@@ -127,7 +125,6 @@ If you want to use MCP tools, you must output as the following format:
 
 
 ## Note
-- Available Apps: `["Contacts", "Settings", "Clock", "Maps", "Chrome", "Calendar", "files", "Gallery", "Taodian", "Mattermost", "Mastodon", "Mail", "SMS", "Camera"]`.
 - Write a small plan and finally summarize your next action (with its target element) in one sentence in <thinking></thinking> part.
 """.strip()
 )
