@@ -423,6 +423,15 @@ def save_trajectory_mp4(
     return str(output_path.resolve())
 
 
+def get_agent_last_prompt(agent) -> str:
+    if agent is None:
+        return ""
+    getter = getattr(agent, "get_last_prompt", None)
+    if callable(getter):
+        return str(getter() or "").strip()
+    return ""
+
+
 def parse_action_from_step(step_result) -> dict:
     parsed = step_result[0] if isinstance(step_result, tuple) else step_result
     action_type = getattr(parsed, "action_type", None) or ""
@@ -599,6 +608,7 @@ def run_navigation_loop(
         model_start = time.time()
         step_result, _ = agent.step(navigation_memory, screenshot)
         model_prediction_s = time.time() - model_start
+        prompt = get_agent_last_prompt(agent)
 
         other_start = time.time()
         parsed_action = parse_action_from_step(step_result)
@@ -620,6 +630,7 @@ def run_navigation_loop(
             "start_coordinate": parsed_action.get("start_coordinate"),
             "end_coordinate": parsed_action.get("end_coordinate"),
             "thought": parsed_action["thought"],
+            "prompt": prompt,
             "timing": timing,
         }
         actions.append(action_record)
@@ -627,6 +638,7 @@ def run_navigation_loop(
         step_payload = {
             "step": step_idx + 1,
             "action": action_record,
+            "prompt": prompt,
             "elapsed_s": time.time() - step_start,
             "timing": timing,
             "screenshot": screenshot,

@@ -171,6 +171,18 @@ class BaseAgent(ABC):
         if hasattr(client, "messages"):
             client.messages = []
 
+    def get_last_prompt(self) -> str:
+        """Return the most recent model prompt, if the client exposes it."""
+        client = self.agent_client
+        if client is None:
+            return ""
+        if hasattr(client, "last_prompt"):
+            return str(getattr(client, "last_prompt", "") or "").strip()
+        navigation = getattr(client, "_navigation", None)
+        if navigation is not None and hasattr(navigation, "last_prompt"):
+            return str(getattr(navigation, "last_prompt", "") or "").strip()
+        return ""
+
     def step(self, instruction: str, screenshot: np.ndarray) -> Tuple[Any, int, int]:
         f = getattr(self, "resize_factor", 1.0)
         img = self._resize_img(screenshot, f)

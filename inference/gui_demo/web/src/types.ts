@@ -67,8 +67,9 @@ export interface StepTiming {
 
 export interface ChatMessage {
   id: string;
-  role: "user" | "assistant" | "system" | "step" | "candidates";
+  role: "user" | "assistant" | "system" | "step" | "candidates" | "plan";
   content: string;
+  prompt?: string;
   imageB64?: string;
   annotatedB64?: string;
   actionType?: string;

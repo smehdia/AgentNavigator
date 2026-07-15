@@ -17,6 +17,9 @@ interface Props {
   onResetToStartPageChange: (v: boolean) => void;
   modelThinking: boolean;
   onModelThinkingChange: (v: boolean) => void;
+  navigationPrompt: string;
+  onPlanChange: (value: string) => void;
+  planMsgId?: string | null;
 }
 
 function CandidateCards({
@@ -142,6 +145,9 @@ export default function ChatPanel({
   onResetToStartPageChange,
   modelThinking,
   onModelThinkingChange,
+  navigationPrompt,
+  onPlanChange,
+  planMsgId = null,
 }: Props) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -201,16 +207,50 @@ export default function ChatPanel({
                   ? "bg-slate-50 border border-slate-200"
                   : msg.role === "candidates"
                   ? "bg-slate-50 border border-slate-200 w-full max-w-full"
+                  : msg.role === "plan"
+                  ? "bg-slate-50 border border-slate-200 w-full max-w-full"
                   : "bg-slate-100 text-slate-800"
               }`}
             >
+              {msg.role === "plan" && (
+                <div className="w-full">
+                  <div className="text-xs font-semibold text-accent mb-2">Navigation plan</div>
+                  {phase === "ready" && msg.id === planMsgId ? (
+                    <>
+                      <textarea
+                        value={navigationPrompt}
+                        onChange={(e) => onPlanChange(e.target.value)}
+                        rows={14}
+                        className="w-full text-xs font-mono text-slate-700 whitespace-pre-wrap bg-white border border-slate-200 rounded-lg p-3 resize-y min-h-[180px] focus:outline-none focus:ring-2 focus:ring-accent/40"
+                      />
+                      <p className="text-[10px] text-slate-400 mt-2">
+                        Edit the plan above before executing. This is the instruction sent to the agent.
+                      </p>
+                    </>
+                  ) : (
+                    <pre className="text-xs font-mono text-slate-700 whitespace-pre-wrap bg-white border border-slate-200 rounded-lg p-3 max-h-64 overflow-y-auto">
+                      {msg.content}
+                    </pre>
+                  )}
+                </div>
+              )}
+              {msg.role === "step" && msg.prompt && (
+                <div className="mb-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
+                    Prompt
+                  </div>
+                  <pre className="text-xs font-mono text-slate-700 whitespace-pre-wrap bg-white border border-slate-200 rounded-lg p-2 max-h-48 overflow-y-auto">
+                    {msg.prompt}
+                  </pre>
+                </div>
+              )}
               {msg.role === "step" && msg.step != null && (
                 <div className="text-xs font-semibold text-accent mb-1">Step {msg.step}</div>
               )}
               {msg.actionType && (
                 <div className="text-xs font-mono text-slate-500 mb-1">Action: {msg.actionType}</div>
               )}
-              {msg.content && (
+              {msg.content && msg.role !== "plan" && (
                 <div className="text-sm prose prose-sm max-w-none prose-p:my-1">
                   {msg.role === "assistant" || msg.role === "candidates" ? (
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
@@ -272,11 +312,12 @@ export default function ChatPanel({
               disabled
               rows={1}
               className="flex-1 px-3 py-2 rounded-lg border border-slate-100 bg-slate-50 text-sm text-slate-400 resize-none"
-              placeholder="Select a destination above, then execute"
+              placeholder="Review the navigation plan above, then execute"
             />
             <button
               onClick={onExecute}
-              className="px-5 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 shrink-0"
+              disabled={!navigationPrompt.trim()}
+              className="px-5 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-medium hover:bg-emerald-500 shrink-0 disabled:opacity-50"
             >
               Execute
             </button>

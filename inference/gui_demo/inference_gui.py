@@ -131,7 +131,7 @@ class SelectNodeRequest(BaseModel):
 
 
 class NavigationMemoryRequest(BaseModel):
-    node_id: str
+    node_id: Optional[str] = None
     query: str
 
 
@@ -140,6 +140,7 @@ class ExecuteStartRequest(BaseModel):
     node_id: Optional[str] = None
     reset_to_start_page: bool = True
     model_thinking: bool = True
+    navigation_memory: Optional[str] = None
 
 
 def _apply_model_thinking(agent: Any, enabled: bool) -> None:
@@ -183,6 +184,7 @@ class InferenceSession:
         self._stop_requested: bool = False
         self.reset_to_start_page: bool = True
         self.model_thinking: bool = True
+        self.navigation_memory_override: Optional[str] = None
 
     def driver_settings(self) -> dict:
         d = dict(self.config.get("driver", {}))
@@ -689,8 +691,6 @@ def navigation_memory(body: NavigationMemoryRequest) -> dict:
     if not session.resources_loaded or not session.ctx:
         raise HTTPException(400, "Resources not loaded")
     node_id = body.node_id or session.selected_node_id
-    if not node_id:
-        raise HTTPException(400, "No node selected")
     query = body.query or session.current_query
     cfg = _config_object()
     if getattr(cfg, "use_memory_for_navigation", False) and node_id:
@@ -706,6 +706,16 @@ def navigation_memory(body: NavigationMemoryRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_navigation_memory(query: str, node_id: Optional[str], override: Optional[str] = None) -> str:
+    if override:
+        return override
+    cfg = _config_object()
+    if getattr(cfg, "use_memory_for_navigation", False) and node_id and session.ctx:
+        return get_navigation_memory_for_node(session.ctx, node_id, query)
+    from .pipeline import format_navigation_plan
+    return format_navigation_plan([], query)
+
+
 @app.post("/api/execute/start")
 def execute_start(body: ExecuteStartRequest) -> dict:
     if not session.resources_loaded:
@@ -719,18 +729,13 @@ def execute_start(body: ExecuteStartRequest) -> dict:
 
     query = body.query or session.current_query
     node_id = body.node_id or session.selected_node_id
-    cfg = _config_object()
-
-    if getattr(cfg, "use_memory_for_navigation", False) and node_id:
-        navigation_memory = get_navigation_memory_for_node(session.ctx, node_id, query)
-    else:
-        from .pipeline import format_navigation_plan
-        navigation_memory = format_navigation_plan([], query)
 
     session.current_query = query
     session.selected_node_id = node_id
     session.reset_to_start_page = body.reset_to_start_page
     session.model_thinking = body.model_thinking
+    override = (body.navigation_memory or "").strip()
+    session.navigation_memory_override = override or None
     _apply_model_thinking(session.agent, body.model_thinking)
     session._stop_requested = False
     return {"ok": True, "message": "Connect to /ws/execution to stream steps"}
@@ -762,11 +767,11 @@ async def ws_execution(websocket: WebSocket) -> None:
     node_id = session.selected_node_id
     cfg = _config_object()
 
-    if getattr(cfg, "use_memory_for_navigation", False) and node_id:
-        navigation_memory = get_navigation_memory_for_node(session.ctx, node_id, query)
-    else:
-        from .pipeline import format_navigation_plan
-        navigation_memory = format_navigation_plan([], query)
+    navigation_memory = _resolve_navigation_memory(
+        query,
+        node_id,
+        session.navigation_memory_override,
+    )
 
     max_steps = getattr(getattr(cfg, "agent", None), "max_steps", 10) or 10
     _apply_model_thinking(session.agent, session.model_thinking)
@@ -828,6 +833,7 @@ async def ws_execution(websocket: WebSocket) -> None:
                 {
                     "type": "step",
                     "step": step_num,
+                    "prompt": payload.get("prompt") or action.get("prompt", ""),
                     "thought": action.get("thought", ""),
                     "action_type": action.get("type", ""),
                     "coordinate": action.get("coordinate"),
@@ -895,6 +901,7 @@ async def ws_execution(websocket: WebSocket) -> None:
         await websocket.send_json({"type": "error", "message": str(exc)})
     finally:
         session._executing = False
+        session.navigation_memory_override = None
 
 
 # ---------------------------------------------------------------------------

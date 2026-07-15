@@ -55,6 +55,8 @@ export default function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [currentQuery, setCurrentQuery] = useState("");
   const [candidatesMsgId, setCandidatesMsgId] = useState<string | null>(null);
+  const [navigationPrompt, setNavigationPrompt] = useState("");
+  const [planMsgId, setPlanMsgId] = useState<string | null>(null);
   const [resetToStartPage, setResetToStartPage] = useState(true);
   const [modelThinking, setModelThinking] = useState(true);
 
@@ -84,6 +86,8 @@ export default function App() {
     setSelectedNodeId(null);
     setCurrentQuery("");
     setCandidatesMsgId(null);
+    setNavigationPrompt("");
+    setPlanMsgId(null);
   }, []);
 
   useEffect(() => {
@@ -250,6 +254,31 @@ export default function App() {
     setPreparePhase("idle");
   };
 
+  const showNavigationPlan = async (query: string, nodeId?: string) => {
+    const { memory } = await fetchNavigationMemory(query, nodeId);
+    const msgId = uid();
+    setPlanMsgId(msgId);
+    setNavigationPrompt(memory);
+    setChatMessages((m) => [
+      ...m,
+      {
+        id: msgId,
+        role: "plan",
+        content: memory,
+      },
+    ]);
+    setNavPhase("ready");
+  };
+
+  const handlePlanChange = (value: string) => {
+    setNavigationPrompt(value);
+    if (planMsgId) {
+      setChatMessages((m) =>
+        m.map((msg) => (msg.id === planMsgId ? { ...msg, content: value } : msg))
+      );
+    }
+  };
+
   const handleSendPrompt = async () => {
     const query = chatInput.trim();
     if (!query || navPhase !== "input") return;
@@ -257,6 +286,8 @@ export default function App() {
     setCurrentQuery(query);
     setSelectedNodeId(null);
     setCandidatesMsgId(null);
+    setPlanMsgId(null);
+    setNavigationPrompt("");
     setChatMessages((m) => [...m, { id: uid(), role: "user", content: query }]);
     setChatInput("");
     setNavPhase("retrieving");
@@ -270,10 +301,10 @@ export default function App() {
             {
               id: uid(),
               role: "assistant",
-              content: "No retrieval candidates found. Click **Execute** to navigate without memory.",
+              content: "No retrieval candidates found. Review and edit the navigation plan below, then click **Execute**.",
             },
           ]);
-          setNavPhase("ready");
+          await showNavigationPlan(query);
         } else {
           const msgId = uid();
           setCandidatesMsgId(msgId);
@@ -294,10 +325,10 @@ export default function App() {
           {
             id: uid(),
             role: "assistant",
-            content: "Memory navigation is off. Click **Execute** to start on-device navigation.",
+            content: "Memory navigation is off. Review and edit the navigation plan below, then click **Execute**.",
           },
         ]);
-        setNavPhase("ready");
+        await showNavigationPlan(query);
       }
     } catch (e) {
       setChatMessages((m) => [...m, { id: uid(), role: "assistant", content: `Error: ${e}` }]);
@@ -318,12 +349,15 @@ export default function App() {
     setNavPhase("loading_memory");
     try {
       await selectNode(nodeId);
-      const { memory } = await fetchNavigationMemory(nodeId, currentQuery);
       setChatMessages((m) => [
         ...m,
-        { id: uid(), role: "assistant", content: `**Navigation memory for \`${nodeId}\`:**\n\n${memory}` },
+        {
+          id: uid(),
+          role: "assistant",
+          content: `Selected \`${nodeId}\`. Review and edit the navigation plan below, then click **Execute**.`,
+        },
       ]);
-      setNavPhase("ready");
+      await showNavigationPlan(currentQuery, nodeId);
     } catch (e) {
       setChatMessages((m) => [...m, { id: uid(), role: "assistant", content: `Error loading memory: ${e}` }]);
       setNavPhase("selecting");
@@ -331,7 +365,7 @@ export default function App() {
   };
 
   const handleExecute = async () => {
-    if (navPhase !== "ready") return;
+    if (navPhase !== "ready" || !navigationPrompt.trim()) return;
 
     setNavPhase("executing");
     const resetMsg = resetToStartPage
@@ -347,7 +381,13 @@ export default function App() {
     ]);
 
     try {
-      await executeStart(currentQuery, selectedNodeId ?? undefined, resetToStartPage, modelThinking);
+      await executeStart(
+        currentQuery,
+        selectedNodeId ?? undefined,
+        resetToStartPage,
+        modelThinking,
+        navigationPrompt
+      );
 
       execWsRef.current?.close();
       const ws = new WebSocket(wsUrl("/ws/execution"));
@@ -361,6 +401,7 @@ export default function App() {
               id: uid(),
               role: "step",
               step: data.step,
+              prompt: data.prompt || "",
               content: data.thought || "",
               actionType: data.action_type,
               imageB64: data.screenshot_b64,
@@ -479,6 +520,9 @@ export default function App() {
                 onResetToStartPageChange={setResetToStartPage}
                 modelThinking={modelThinking}
                 onModelThinkingChange={setModelThinking}
+                navigationPrompt={navigationPrompt}
+                onPlanChange={handlePlanChange}
+                planMsgId={planMsgId}
               />
             </div>
             <div className="hidden lg:flex items-center justify-center bg-slate-100 rounded-xl border border-slate-200 overflow-hidden min-h-[280px]">

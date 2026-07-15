@@ -61,10 +61,13 @@ export async function selectNode(nodeId: string): Promise<void> {
   await request("/api/select-node", { method: "POST", body: JSON.stringify({ node_id: nodeId }) });
 }
 
-export async function fetchNavigationMemory(nodeId: string, query: string): Promise<{ memory: string }> {
+export async function fetchNavigationMemory(query: string, nodeId?: string): Promise<{ memory: string }> {
   return request("/api/navigation-memory", {
     method: "POST",
-    body: JSON.stringify({ node_id: nodeId, query }),
+    body: JSON.stringify({
+      query,
+      ...(nodeId ? { node_id: nodeId } : {}),
+    }),
   });
 }
 
@@ -72,7 +75,8 @@ export async function executeStart(
   query: string,
   nodeId?: string,
   resetToStartPage: boolean = true,
-  modelThinking: boolean = true
+  modelThinking: boolean = true,
+  navigationMemory?: string
 ): Promise<void> {
   await request("/api/execute/start", {
     method: "POST",
@@ -81,6 +85,7 @@ export async function executeStart(
       node_id: nodeId,
       reset_to_start_page: resetToStartPage,
       model_thinking: modelThinking,
+      ...(navigationMemory != null ? { navigation_memory: navigationMemory } : {}),
     }),
   });
 }

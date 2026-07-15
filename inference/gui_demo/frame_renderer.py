@@ -420,6 +420,7 @@ def render_web_step_frame(
 
     layout = layout or get_render_layout()
     canvas_width = layout.canvas_width
+    prompt = str(action.get("prompt", "")).strip()
     thought = str(action.get("thought", "")).strip()
     action_type = str(action.get("type", "")).strip() or "unknown"
     direction = str(action.get("direction", "")).strip().lower()
@@ -447,18 +448,22 @@ def render_web_step_frame(
     font_mono = _load_font(layout.dim(12), mono=True)
     font_body = _load_font(layout.dim(14))
     font_timing = _load_font(layout.dim(11), mono=True)
+    font_prompt_label = _load_font(layout.dim(10), bold=True)
+    font_prompt = _load_font(layout.dim(11), mono=True)
 
     inner_w = layout.inner_width
     shot_max_h = layout.step_shot_max_h
 
     dummy = Image.new("RGB", (canvas_width, 10))
     draw = ImageDraw.Draw(dummy)
+    prompt_lines = _wrap_text(prompt, font_prompt, inner_w, draw) if prompt else []
     thought_lines = _wrap_text(thought, font_body, inner_w, draw)
 
     shot_box, shot_w, shot_h = _fit_image_contain_bgr(annotated_bgr, inner_w, shot_max_h)
 
     text_block_h = (
-        _line_height(font_step, draw)
+        (len(prompt_lines) * (_line_height(font_prompt, draw) + layout.dim(2)) + layout.dim(18) if prompt_lines else 0)
+        + _line_height(font_step, draw)
         + layout.dim(6)
         + _line_height(font_mono, draw)
         + layout.dim(10)
@@ -478,6 +483,14 @@ def render_web_step_frame(
 
     x = card_x0 + layout.card_padding
     y = card_y0 + layout.card_padding
+
+    if prompt_lines:
+        draw.text((x, y), "PROMPT", font=font_prompt_label, fill=COLOR_MUTED_RGB)
+        y += _line_height(font_prompt_label, draw) + layout.dim(4)
+        for line in prompt_lines:
+            draw.text((x, y), line, font=font_prompt, fill=COLOR_TEXT_RGB)
+            y += _line_height(font_prompt, draw) + layout.dim(2)
+        y += layout.dim(12)
 
     draw.text((x, y), f"Step {step_num}", font=font_step, fill=COLOR_ACCENT_RGB)
     y += _line_height(font_step, draw) + layout.dim(6)
