@@ -965,7 +965,6 @@ USER_INTENTS:
 if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
 
-    # i want to get config file from user
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="configs/clock_android.yaml")
     args = parser.parse_args()
@@ -1003,8 +1002,5 @@ if __name__ == "__main__":
     dbg.log("Stage 6 User Intents Embedding starting: user_intents.json", color="yellow")
     add_node_embeddings_to_user_intents(configs.logs.root, "node_level_information.json", "user_intents.json", "user_intents.json", "BAAI/bge-m3", 4, 8192)
     dbg.log("Stage 6 User Intents Embedding complete: user_intents.json", color="green")
-    agent_thoughts = save_agent_thoughts(nx_graph, node_level_information, edge_level_information, user_intents, vlm_client, configs, dbg)
-    dbg.log("Stage 7 Agent Thoughts starting: agent_data.json", color="yellow")
-    dbg.log("Stage 7 Agent Thoughts complete: agent_data.json", color="green")
 
 
