@@ -3,22 +3,22 @@ default:
   debug_mode: False
 
   app:
-    name: "Retro Music"
-    description: "Retro Music is a material design music player for browsing and playing local songs, albums, and playlists."
+    name: "SoundCloud"
+    description: "SoundCloud is a music streaming app for discovering, listening to, and sharing songs and podcasts."
 
   driver:
     device_id: "R3CX20L5N6F"
     os_name: "android"
-    appPackage: "code.name.monkey.retromusic"
-    appActivity: ".activities.MainActivity"
+    appPackage: "com.soundcloud.android"
+    appActivity: ".launcher.LauncherActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
-    reset_instruction: "Go to For you tab (the first tab in the bottom navigation bar). Then return finished."
+    reset_instruction: "If there is an advertisement close it and go to Home. Then return finished."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
     yibu_api_key: 'sk-RBKsBNgCvZPw61tyyJjZZS78ewggEyoTDIRCtZ5hxKVqQpHa'
-    use_yibu_api: true
+    use_yibu_api: false
     model_name_for_page_summary: 'qwen3.5-flash'
     screenshot_longest_side_for_element_extraction_model: 1536
     model_name_for_elements_extraction: 'qwen3.6-plus'
@@ -96,7 +96,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/retro_music"
+    root: "explored_apps/sound_cloud"
     resume_from_checkpoint: true
 
   post_process:
