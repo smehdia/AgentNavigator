@@ -122,90 +122,186 @@ def format_node_navigation_plans(node_navigation_plans):
 
     return "\n".join(output_lines).strip()
 
-def get_pair_data(debug=False):
-    # select two random node_ids
+
+def get_node_data(node_id: str) -> dict[str, Any]:
+    node = next(
+        node
+        for node in graph_json["nodes"]
+        if node["id"] == node_id
+    )
+
+    screenshot = cv2.imread(
+        os.path.join(
+            APP_DIR,
+            "screenshots",
+            f"{node_id}.jpg",
+        )
+    )
+
+    if screenshot is None:
+        raise FileNotFoundError(
+            f"Could not load screenshot for node {node_id}."
+        )
+
+    shortest_path = shortest_path_from_root(
+        node_id,
+        networkx_graph,
+    )
+
+    previous_screenshot = None
+    previous_node_id = None
+
+    action_type = NONE
+    action_coordinate_center = None
+
+    if len(shortest_path) >= 2:
+        previous_node_id = shortest_path[-2]
+
+        previous_screenshot = cv2.imread(
+            os.path.join(
+                APP_DIR,
+                "screenshots",
+                f"{previous_node_id}.jpg",
+            )
+        )
+
+        edge = next(
+            edge
+            for edge in graph_json["links"]
+            if (
+                edge["source"] == previous_node_id
+                and edge["target"] == node_id
+            )
+        )
+
+        edge_type = edge.get("type", "").lower()
+
+        if "swipe" in edge_type:
+            action_type = SWIPE
+
+        elif "scroll" in edge_type:
+            action_type = SCROLL
+
+        elif "tap" in edge_type:
+            action_type = TAP
+
+            bbox = edge.get("boundingBox")
+            if bbox is None:
+                raise ValueError(
+                    f"Tap edge {previous_node_id} -> {node_id} "
+                    "does not contain a boundingBox."
+                )
+
+            x1, y1, x2, y2 = bbox
+
+            action_coordinate_center = (
+                (x1 + x2) / 2.0,
+                (y1 + y2) / 2.0,
+            )
+
+    ui_bboxes = []
+
+    for element in node.get("ui_elements", []):
+        element_type = element.get("type", "").lower()
+
+        if (
+            "swipe" not in element_type
+            and "scroll" not in element_type
+            and "boundingBox" in element
+        ):
+            ui_bboxes.append(element["boundingBox"])
+
+    intents = format_user_intents(
+        user_intents_json[node_id]["user_intents"]
+    )
+
+    navigation_plans = format_node_navigation_plans(
+        node_navigation_plans_json[node_id]
+    )
+
+    page_description = node_level_information_json[
+        node_id
+    ]["high_level"]
+
+    canonical_layout = node.get(
+        "canonical_page_layout",
+        {},
+    )
+
+    # Modify these keys to match your actual JSON schema.
+    active_tab = canonical_layout.get(
+        "active_tab",
+        "",
+    )
+
+    active_subtab = canonical_layout.get(
+        "active_subtab",
+        "",
+    )
+
+    return {
+        "node_id": node_id,
+        "previous_node_id": previous_node_id,
+
+        "screenshot": screenshot,
+        "screenshot_prev": previous_screenshot,
+
+        "action_type": action_type,
+        "action_coordinate_center":
+            action_coordinate_center,
+
+        "node_intents": intents,
+        "node_navigation_plans": navigation_plans,
+
+        "page_description": page_description,
+        "active_tab": active_tab,
+        "active_subtab": active_subtab,
+
+        "ui_bboxes": ui_bboxes,
+        "canonical_page_layout": canonical_layout,
+        "shortest_path": shortest_path,
+    }
+
+
+def get_pair_data(
+    debug: bool = False,
+) -> tuple[dict, dict]:
     node_id1 = random.choice(node_ids)
     node_id2 = random.choice(node_ids)
-    node1 = next(node for node in graph_json["nodes"] if node["id"] == node_id1)
-    node2 = next(node for node in graph_json["nodes"] if node["id"] == node_id2)
 
-    screenshot_1 = cv2.imread(os.path.join(APP_DIR, "screenshots", f"{node_id1}.jpg"))
-    screenshot_2 = cv2.imread(os.path.join(APP_DIR, "screenshots", f"{node_id2}.jpg"))
-
-    shortest_path_1 = shortest_path_from_root(node_id1, networkx_graph)
-    shortest_path_2 = shortest_path_from_root(node_id2, networkx_graph)
-
-
-    node_1_intents = format_user_intents(user_intents_json[node_id1]['user_intents'])
-    node_2_intents = format_user_intents(user_intents_json[node_id2]['user_intents'])
-
-    node_1_navigation_plans = format_node_navigation_plans(node_navigation_plans_json[node_id1])
-    node_2_navigation_plans = format_node_navigation_plans(node_navigation_plans_json[node_id2])
-
-
-    screenshot_1_prev = None
-    action_type_1 = NONE
-    action_coordinate_center = None
-    if len(shortest_path_1) >= 2:
-        node_id1_prev = shortest_path_1[-2]
-        screenshot_1_prev = cv2.imread(os.path.join(APP_DIR, "screenshots", f"{node_id1_prev}.jpg"))
-        # get edge between node_id1_prev and node_id1
-        edge = next(edge for edge in graph_json["links"] if edge["source"] == node_id1_prev and edge["target"] == node_id1)
-        if 'swipe' in edge['type']:
-            action_type = SWIPE
-        elif 'scroll' in edge['type']:
-            action_type = SCROLL
-        elif 'tap' in edge['type']:
-            action_type = TAP
-            x1, y1, x2, y2 = edge['boundingBox']
-            x_center = (x1 + x2) / 2
-            y_center = (y1 + y2) / 2
-            action_coordinate_center = (x_center, y_center)
-    
-    
-    ui_elements_1 = node1['ui_elements']
-    ui_elements_2 = node2['ui_elements']
-
-    mask = create_mask_for_interactive_elements(ui_elements_1, screenshot_1)
+    node1_info = get_node_data(node_id1)
+    node2_info = get_node_data(node_id2)
 
     if debug:
-        cv2.imshow("mask", cv2.resize(mask, None, fx=0.5, fy=0.5))
-        cv2.imshow("screenshot_1", cv2.resize(screenshot_1, None, fx=0.5, fy=0.5))
+        for index, node_info in enumerate(
+            [node1_info, node2_info],
+            start=1,
+        ):
+            mask = create_mask_for_interactive_elements(
+                next(
+                    node
+                    for node in graph_json["nodes"]
+                    if node["id"] == node_info["node_id"]
+                )["ui_elements"],
+                node_info["screenshot"],
+            )
+
+            cv2.imshow(
+                f"mask_{index}",
+                cv2.resize(mask, None, fx=0.5, fy=0.5),
+            )
+
+            cv2.imshow(
+                f"screenshot_{index}",
+                cv2.resize(
+                    node_info["screenshot"],
+                    None,
+                    fx=0.5,
+                    fy=0.5,
+                ),
+            )
+
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-    page_description1 = node_level_information_json[node_id1]
-    page_description2 = node_level_information_json[node_id2]
-
-
-
-    return screenshot_1, screenshot_2
-
-
-screenshot_1, screenshot_2 = get_pair_data()
-
-
-# model_path = "/home/mehdi/Desktop/MAI-UI-2B/"
-# processor = AutoProcessor.from_pretrained(model_path)
-# mai_ui_model = Qwen3VLForConditionalGeneration.from_pretrained(model_path, torch_dtype="auto", device_map="cpu")
-
-# from model import ScreenshotUIGraphEmbedder, UIGraphEmbedder, count_trainable_parameters, FrozenMAIUIVisualExtractor
-
-# extractor = FrozenMAIUIVisualExtractor(processor, mai_ui_model)
-
-# trainable = UIGraphEmbedder(token_dim=2048, pooled_dim=256, embedding_dim=256).to(mai_ui_model.device)
-# embedder = ScreenshotUIGraphEmbedder(extractor, trainable)
-# #
-
-
-# # Later tap step:
-out = embedder(screenshot_1, screenshot_2, 3, (10, 100))
-
-print(out.current_element_logits)
-# embedding = out.embedding  # [1, 256]
-
-
-
-
-
-asd
+    return node1_info, node2_info
