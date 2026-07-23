@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+SCROLL, SWIPE, TAP, NONE = 1, 2, 3, 4
+
 
 @dataclass
 class VisualTokens:
@@ -21,7 +23,7 @@ class VisualTokens:
 @dataclass
 class EmbedderOutput:
     embedding: torch.Tensor
-
+    on_graph_logit: torch.Tensor
     predicted_current_screen: torch.Tensor
 
     predicted_tab_embedding: torch.Tensor
@@ -288,6 +290,14 @@ class HistoryAttention(nn.Module):
 class UIGraphEmbedder(nn.Module):
     """Trainable network over frozen MAI-UI visual tokens."""
 
+    EMBEDDING_MODULE_NAMES = (
+        "token_norm",
+        "screen_encoder",
+        "action_encoder",
+        "history_encoder",
+        "embedding_head",
+    )
+
     def __init__(
         self,
         token_dim: int = 2048,
@@ -352,6 +362,115 @@ class UIGraphEmbedder(nn.Module):
             embedding_dim,
             text_embedding_dim,
         )
+
+        self.on_graph_head = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(embedding_dim // 2, 1),
+        )
+
+        self.token_dim = token_dim
+        self.pooled_dim = pooled_dim
+        self.embedding_dim = embedding_dim
+        self.text_embedding_dim = text_embedding_dim
+
+    def embedding_parameter_count(self) -> int:
+        return sum(
+            count_trainable_parameters(getattr(self, name))
+            for name in self.EMBEDDING_MODULE_NAMES
+        )
+
+    def embedding_state_dict(self) -> dict:
+        state = {}
+        for name in self.EMBEDDING_MODULE_NAMES:
+            module = getattr(self, name)
+            for key, value in module.state_dict().items():
+                state[f"{name}.{key}"] = value
+        return state
+
+    def load_embedding_state_dict(self, state_dict, strict: bool = True):
+        missing, unexpected = self.load_state_dict(state_dict, strict=False)
+        missing = [
+            key for key in missing
+            if key.split(".", 1)[0] in self.EMBEDDING_MODULE_NAMES
+        ]
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                f"Error loading embedding state_dict. "
+                f"Missing: {missing}. Unexpected: {unexpected}."
+            )
+        return missing, unexpected
+
+    def forward_embedding(
+        self,
+        current_tokens,
+        current_positions,
+        previous_tokens: Optional[torch.Tensor],
+        previous_positions: Optional[torch.Tensor],
+        action_type,
+        action_xy,
+        history_available,
+        current_valid_mask=None,
+        previous_valid_mask=None,
+    ) -> torch.Tensor:
+        """Inference path: screenshot tokens + optional prev/action → embedding."""
+        current_tokens = self.token_norm(current_tokens)
+        current = self.screen_encoder(
+            current_tokens,
+            current_positions,
+            current_valid_mask,
+        )
+
+        batch_size, _, token_dim = current_tokens.shape
+
+        if previous_tokens is None or previous_positions is None:
+            if torch.any(history_available):
+                raise ValueError(
+                    "Previous tokens are required for samples with history."
+                )
+            previous_tokens = torch.zeros(
+                batch_size,
+                1,
+                token_dim,
+                device=current_tokens.device,
+                dtype=current_tokens.dtype,
+            )
+            previous_positions = torch.zeros(
+                batch_size,
+                1,
+                2,
+                device=current_tokens.device,
+                dtype=current_tokens.dtype,
+            )
+            previous_valid_mask = torch.ones(
+                batch_size,
+                1,
+                device=current_tokens.device,
+                dtype=torch.bool,
+            )
+        else:
+            previous_tokens = self.token_norm(previous_tokens)
+
+        previous = self.screen_encoder(
+            previous_tokens,
+            previous_positions,
+            previous_valid_mask,
+        )
+        action = self.action_encoder(
+            previous_tokens,
+            previous_positions,
+            action_type,
+            action_xy,
+            previous_valid_mask,
+        )
+        history_state = self.history_encoder(
+            previous_screen=previous["screen"],
+            previous_action=action["action"],
+            current_screen=current["screen"],
+            history_available=history_available,
+        )
+        return F.normalize(self.embedding_head(history_state), dim=-1)
 
     def forward(
         self,
@@ -432,6 +551,10 @@ class UIGraphEmbedder(nn.Module):
             dim=-1,
         )
 
+        on_graph_logit = self.on_graph_head(
+        embedding).squeeze(-1)  # [B]
+
+
         predicted_current_screen = self.transition_predictor(
             previous_screen_vector=previous["screen"],
             action_vector=action["action"],
@@ -469,6 +592,7 @@ class UIGraphEmbedder(nn.Module):
 
         return EmbedderOutput(
             embedding=embedding,
+            on_graph_logit=on_graph_logit,
             predicted_current_screen=predicted_current_screen,
             predicted_tab_embedding=predicted_tab_embedding,
             predicted_subtab_embedding=predicted_subtab_embedding,

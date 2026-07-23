@@ -1,6 +1,131 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
+
+def get_graph_distance(
+    distance_graph_dict,
+    node_id1: str,
+    node_id2: str,
+) -> float | None:
+    distance = distance_graph_dict.get((node_id1, node_id2))
+    if distance is None:
+        return None
+    if isinstance(distance, float) and math.isinf(distance):
+        return None
+    return float(distance)
+
+
+def get_symmetric_graph_distance(
+    distance_graph_dict,
+    node_id1: str,
+    node_id2: str,
+) -> float | None:
+    forward = get_graph_distance(
+        distance_graph_dict,
+        node_id1,
+        node_id2,
+    )
+
+    backward = get_graph_distance(
+        distance_graph_dict,
+        node_id2,
+        node_id1,
+    )
+
+    available = [
+        distance
+        for distance in [forward, backward]
+        if distance is not None
+    ]
+
+    if not available:
+        return None
+
+    return min(available)
+
+
+def direct_text_alignment_loss(
+    predicted_embedding: torch.Tensor,  # [B, D]
+    target_text_embedding: torch.Tensor,  # [B, D]
+    available_mask: torch.Tensor | None = None,  # [B]
+) -> torch.Tensor:
+    """Cosine alignment of a predicted embedding to a frozen text embedding."""
+    predicted = F.normalize(predicted_embedding, dim=-1)
+    target = F.normalize(target_text_embedding.detach(), dim=-1)
+    per_sample_loss = 1.0 - (predicted * target).sum(dim=-1)
+
+    if available_mask is None:
+        return per_sample_loss.mean()
+
+    mask = available_mask.to(per_sample_loss.dtype)
+    return (per_sample_loss * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def soft_set_alignment_loss(
+    predicted_embedding: torch.Tensor,       # [B, D]
+    target_set_embeddings: torch.Tensor,     # [B, K, D]
+    set_mask: torch.Tensor,                  # [B, K], bool
+    available_mask: torch.Tensor | None = None,  # [B]
+    temperature: float = 0.07,
+) -> torch.Tensor:
+    """
+    Soft best-match alignment of a prediction to a set of frozen embeddings.
+    """
+    predicted = F.normalize(predicted_embedding, dim=-1)
+    targets = F.normalize(target_set_embeddings.detach(), dim=-1)
+
+    cosine = torch.einsum("bd,bkd->bk", predicted, targets)
+    logits = cosine / temperature
+    logits = logits.masked_fill(~set_mask.bool(), float("-inf"))
+
+    weights = torch.softmax(logits, dim=-1)
+    weights = torch.nan_to_num(weights, nan=0.0)
+    soft_similarity = (weights * cosine).sum(dim=-1)
+
+    per_sample_loss = 1.0 - soft_similarity
+    sample_available = set_mask.any(dim=-1)
+    if available_mask is not None:
+        sample_available = sample_available & available_mask.bool()
+
+    mask = sample_available.to(per_sample_loss.dtype)
+    return (per_sample_loss * mask).sum() / mask.sum().clamp_min(1.0)
+
+
+def batch_siamese_text_similarity_loss(
+    predicted_embeddings: torch.Tensor,      # [B, D]
+    target_text_embeddings: torch.Tensor,    # [B, D]
+    available_mask: torch.Tensor | None = None,  # [B]
+) -> torch.Tensor:
+    """
+    Match all pairwise predicted similarities to frozen-text similarities.
+    """
+    predicted = F.normalize(predicted_embeddings, dim=-1)
+    predicted_similarity = predicted @ predicted.T
+
+    with torch.no_grad():
+        target = F.normalize(target_text_embeddings, dim=-1)
+        target_similarity = target @ target.T
+
+    batch_size = predicted.shape[0]
+    pair_mask = ~torch.eye(
+        batch_size,
+        dtype=torch.bool,
+        device=predicted.device,
+    )
+
+    if available_mask is not None:
+        available = available_mask.bool()
+        pair_mask = pair_mask & available[:, None] & available[None, :]
+
+    if not pair_mask.any():
+        return predicted.sum() * 0.0
+
+    return F.smooth_l1_loss(
+        predicted_similarity[pair_mask],
+        target_similarity[pair_mask],
+    )
 
 def interactive_element_loss(
     current_element_logits: torch.Tensor,  # [B, N]
@@ -453,4 +578,88 @@ def batch_soft_geodesic_loss(
     return F.smooth_l1_loss(
         predicted_similarity[pair_mask],
         target_similarity[pair_mask],
+    )
+
+def pairwise_node_localization_loss(
+    embedding1: torch.Tensor,  # [B, D]
+    embedding2: torch.Tensor,  # [B, D]
+    same_node: torch.Tensor,   # [B], bool or 0/1
+    negative_margin: float = 0.2,
+) -> torch.Tensor:
+    """
+    Same node:
+        push cosine similarity toward 1.
+
+    Different node:
+        penalize cosine similarity above negative_margin.
+    """
+    similarity = F.cosine_similarity(
+        embedding1,
+        embedding2,
+        dim=-1,
+    )
+
+    same_node = same_node.to(
+        device=similarity.device,
+        dtype=similarity.dtype,
+    )
+
+    positive_loss = 1.0 - similarity
+
+    negative_loss = F.relu(
+        similarity - negative_margin
+    )
+
+    per_pair_loss = (
+        same_node * positive_loss
+        + (1.0 - same_node) * negative_loss
+    )
+
+    return per_pair_loss.mean()
+
+def on_graph_detection_loss(
+    on_graph_logits: torch.Tensor,  # [B]
+    on_graph_targets: torch.Tensor, # [B], 1=on graph, 0=off graph
+    positive_weight: float | None = None,
+) -> torch.Tensor:
+    """
+    Binary on-graph/off-graph detection loss.
+
+    Positive class:
+        on graph
+
+    Negative class:
+        off graph
+    """
+    if on_graph_logits.ndim != 1:
+        raise ValueError(
+            "on_graph_logits must have shape [B]."
+        )
+
+    if on_graph_targets.shape != on_graph_logits.shape:
+        raise ValueError(
+            "on_graph_targets must have the same shape as logits."
+        )
+
+    targets = on_graph_targets.to(
+        device=on_graph_logits.device,
+        dtype=on_graph_logits.dtype,
+    )
+
+    if positive_weight is None:
+        return F.binary_cross_entropy_with_logits(
+            on_graph_logits,
+            targets,
+        )
+
+    pos_weight = torch.tensor(
+        positive_weight,
+        device=on_graph_logits.device,
+        dtype=on_graph_logits.dtype,
+    )
+
+    return F.binary_cross_entropy_with_logits(
+        on_graph_logits,
+        targets,
+        pos_weight=pos_weight,
     )
