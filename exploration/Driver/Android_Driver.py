@@ -61,7 +61,10 @@ class AndroidDriver(BaseDriver):
             return False
 
     def take_screenshot(self):
-        if self.is_keyboard_open():
+        # Exploration historically dismissed the IME before capture. On Amazon (and
+        # some other apps) BACK from an open search keyboard exits to the launcher,
+        # so GRPO / navigation must disable this via settings.
+        if self.settings.get("dismiss_keyboard_on_screenshot", True) and self.is_keyboard_open():
             self.back()
         raw = self._adb_out(["exec-out", "screencap", "-p"], timeout=20)
         arr = np.frombuffer(raw, np.uint8)
