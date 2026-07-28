@@ -40,7 +40,7 @@ class ImageUtils:
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
         self.clip_image_processor = CLIPImageProcessor.from_pretrained("openai/clip-vit-base-patch32")
         self.clip_tokenizer = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
-        self.text_model_embedder = BGEM3FlagModel('./models/bge-m3', use_fp16=True)
+        self.text_model_embedder = BGEM3FlagModel('BAAI/bge-m3', use_fp16=True)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print("Loading CLIP Model ...")
         self.clip_model = self.clip_model.to(self.device)

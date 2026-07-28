@@ -49,10 +49,16 @@ if __name__ == "__main__":
     print("1) Opening app...")
     driver.run_application()
     driver.wait()
+    fg = driver.get_foreground_package()
+    print(f"  foreground={fg!r}  expected={expected!r}")
+    if fg and fg != expected:
+        print("  WARN: foreground package does not match appPackage after launch")
     print("OK" if ask_ok("App opened correctly?") else "FAIL")
 
     print("2) reset_to_start_page (close, reopen, agent reset_instruction)...")
     driver.reset_to_start_page()
+    fg = driver.get_foreground_package()
+    print(f"  foreground={fg!r}  expected={expected!r}")
     print("OK" if ask_ok("Reset landed on start screen?") else "FAIL")
 
     print("3) Foreground check loop (q to quit)")
