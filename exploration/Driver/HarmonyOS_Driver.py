@@ -1,6 +1,9 @@
 import json
+import os
 import re
 import subprocess
+import tempfile
+import uuid
 from typing import Optional, Tuple
 
 import cv2
@@ -9,6 +12,13 @@ import xml.etree.ElementTree as ET
 
 import logging
 from Driver.BaseDriver import BaseDriver
+
+_IME_WINDOW_RE = re.compile(
+    r"(?i)(?:softKeyboard|KeyboardPanel|KeyboardDialog|inputmethod|input.?method)"
+)
+_IME_BOUNDS_RE = re.compile(
+    r"\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]"
+)
 
 
 class HarmonyDriver(BaseDriver):
@@ -35,40 +45,65 @@ class HarmonyDriver(BaseDriver):
         except Exception:
             return False
 
-
     def is_keyboard_open(self) -> bool:
-        _IME_PKG_RE = re.compile(
-            r'package="[^"]*(?:inputmethod|\.ime\.|keyboard|honeyboard|input-method)',
-            re.I,
-        )
-        _IME_CLASS_RE = re.compile(
-            r'class="[^"]*(?:keyboard|inputmethod|softinput|keyboardpanel)',
-            re.I,
-        )
+        """
+        Fast keyboard check via WindowManagerService (~0.1s).
 
-        def keyboard_visible_in_xml(xml: str) -> bool:
-            if not xml or "</hierarchy>" not in xml:
-                return False
-            return bool(_IME_PKG_RE.search(xml) or _IME_CLASS_RE.search(xml))
-    
+        Avoids uitest dumpLayout (~1s+), which previously ran on every screenshot.
+        A keyboard window is treated as open when ZOrd >= 0 and bounds are non-trivial.
+        """
         try:
-            return keyboard_visible_in_xml(self.get_xml_layout())
+            out = self._hdc_out(
+                ["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+                timeout=5,
+            ).decode("utf-8", "ignore")
         except Exception:
             return False
 
+        for line in out.splitlines():
+            if not _IME_WINDOW_RE.search(line):
+                continue
+            bracket = line.find("[")
+            if bracket == -1:
+                continue
+            head = line[:bracket].split()
+            if len(head) < 2:
+                continue
+            try:
+                zord = int(head[-2])
+            except ValueError:
+                continue
+            m = _IME_BOUNDS_RE.search(line)
+            if not m:
+                continue
+            width, height = int(m.group(1)), int(m.group(2))
+            if zord >= 0 and width > 50 and height > 50:
+                return True
+        return False
+
     def take_screenshot(self):
-        if self.is_keyboard_open():
+        # Match Android: optional IME dismiss before capture. Harmony previously always
+        # paid for a full layout dump here; that alone made reset ~5x slower.
+        if self.settings.get("dismiss_keyboard_on_screenshot", True) and self.is_keyboard_open():
             self.back()
-        # Minimal: use hdc file recv if available; fall back to uitest screenshot.
-        remote = "/data/local/tmp/__agentnav.jpeg"
-        local = "__agentnav.jpeg"
-        self._hdc_run(["shell", "snapshot_display", "-f", remote], timeout=20)
-        self._hdc_run(["file", "recv", remote, local], timeout=30)
-        img = cv2.imread(local)
-        if img is None:
-            raise RuntimeError("Failed to read screenshot from Harmony device.")
-        return img
-        
+
+        tag = uuid.uuid4().hex[:8]
+        remote = f"/data/local/tmp/__agentnav_{tag}.jpeg"
+        local = os.path.join(tempfile.gettempdir(), f"__agentnav_{tag}.jpeg")
+        try:
+            self._hdc_run(["shell", "snapshot_display", "-f", remote], timeout=20)
+            self._hdc_run(["file", "recv", remote, local], timeout=30)
+            img = cv2.imread(local, cv2.IMREAD_COLOR)
+            if img is None or img.size == 0:
+                raise RuntimeError("Failed to read screenshot from Harmony device.")
+            return img
+        finally:
+            try:
+                os.remove(local)
+            except OSError:
+                pass
+            self._hdc_run(["shell", "rm", "-f", remote], timeout=5)
+
     def get_foreground_package(self) -> str | None:
         try:
             out = self._hdc_out(
@@ -100,9 +135,11 @@ class HarmonyDriver(BaseDriver):
         Dump HarmonyOS layout via uitest and normalize to Android-style hierarchy XML.
         """
         remote = "/data/local/tmp/window_dump.xml"
-        # uitest dumpLayout writes either XML or JSON to the given path.
-        self._hdc_run(["shell", "uitest", "dumpLayout", "-p", remote], timeout=30)
-        raw = self._hdc_out(["shell", "cat", remote], timeout=20).decode("utf-8", "ignore")
+        # One round-trip: dump + cat (writes either XML or JSON).
+        raw = self._hdc_out(
+            ["shell", f"uitest dumpLayout -p {remote} >/dev/null && cat {remote}"],
+            timeout=30,
+        ).decode("utf-8", "ignore")
 
         xml_ok = self._normalize_hierarchy_xml(raw)
         if xml_ok.strip():
@@ -216,7 +253,25 @@ class HarmonyDriver(BaseDriver):
     def run_application(self) -> None:
         pkg = self.settings["appPackage"]
         ability = self.settings.get("appActivity", "EntryAbility")
-        self._hdc_run(["shell", "aa", "start", "-a", ability, "-b", pkg], timeout=10)
+        module = self.settings.get("appModule") or "entry"
+        # Prefer explicit module (-m). Some Harmony apps fail or land wrong without it.
+        cmd = ["shell", "aa", "start", "-a", str(ability), "-b", str(pkg), "-m", str(module)]
+        try:
+            out = self._hdc_out(cmd, timeout=15).decode("utf-8", "ignore")
+        except subprocess.CalledProcessError as exc:
+            out = (exc.output or b"").decode("utf-8", "ignore")
+            # Fallback without -m for older bundles
+            try:
+                out2 = self._hdc_out(
+                    ["shell", "aa", "start", "-a", str(ability), "-b", str(pkg)],
+                    timeout=15,
+                ).decode("utf-8", "ignore")
+                out = out2
+            except subprocess.CalledProcessError as exc2:
+                detail = (exc2.output or b"").decode("utf-8", "ignore") or out
+                raise RuntimeError(f"Failed to start Harmony app {pkg}/{ability}: {detail}") from exc2
+        if "error" in out.lower() and "no error" not in out.lower() and "successfully" not in out.lower():
+            raise RuntimeError(f"Failed to start Harmony app {pkg}/{ability}: {out.strip()}")
 
 
     def get_app_version(self):
@@ -313,55 +368,3 @@ class HarmonyDriver(BaseDriver):
                 "error": str(e),
             }
 
-    def is_keyboard_open(self) -> bool:
-        ime_bundle_re = re.compile(r"(?i)(inputmethod|\.ime\.|keyboard|input-method|honeyboard|anco)")
-        ime_class_re = re.compile(r"(?i)(keyboard|inputmethod|softinput|keyboardpanel|inputpanel|ime)")
-        ime_xml_pkg_re = re.compile(
-            r'package="[^"]*(?:inputmethod|\.ime\.|keyboard|honeyboard|input-method|anco)"',
-            re.I,
-        )
-        ime_xml_class_re = re.compile(
-            r'class="[^"]*(?:keyboard|inputmethod|softinput|keyboardpanel|inputpanel|ime)"',
-            re.I,
-        )
-        def is_visible(v) -> bool:
-            s = str(v if v is not None else "").strip().lower()
-            return s in ("", "1", "true", "yes")  # missing visible => treat as visible
-        def node_is_ime(attrs: dict) -> bool:
-            bundle = str(attrs.get("bundleName") or "")
-            klass = str(attrs.get("class") or attrs.get("type") or "")
-            return bool(ime_bundle_re.search(bundle) or ime_class_re.search(klass))
-        def walk_hierarchy(node) -> bool:
-            if not isinstance(node, dict):
-                return False
-            attrs = node.get("attributes") or {}
-            if is_visible(attrs.get("visible")) and node_is_ime(attrs):
-                return True
-            for ch in node.get("children") or []:
-                if walk_hierarchy(ch):
-                    return True
-            return False
-        # 1) Primary: uitest JSON via hmdriver2 (same source as layout dump)
-        try:
-            data = self._hm_driver.dump_hierarchy()
-            roots = data if isinstance(data, list) else [data]
-            if any(walk_hierarchy(r) for r in roots):
-                return True
-        except Exception:
-            pass
-        # 2) Secondary: WindowManager dump (no Android-style dumpsys input_method)
-        try:
-            out = self._hm_driver.shell("hidumper -s WindowManagerService -a '-a'").output
-            if re.search(r"(?i)(inputmethod|soft.?keyboard|keyboardpanel|input.?method)", out):
-                if re.search(r"(?i)(visible|shown|foreground|active).*(true|1)", out):
-                    return True
-        except Exception:
-            pass
-        # 3) Fallback: normalized XML from get_xml_layout()
-        try:
-            xml = self.get_xml_layout()
-            if xml and "</hierarchy>" in xml:
-                return bool(ime_xml_pkg_re.search(xml) or ime_xml_class_re.search(xml))
-        except Exception:
-            pass
-        return False
