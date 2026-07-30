@@ -22,13 +22,15 @@ default:
 
   agent:
     verbose_print: false
-    url: "http://10.193.241.177:8090/v1"
+    url: "http://10.218.163.104:8000/v1"
     model_name: "mai_ui"
-    settings:
+    settings: 
       history_n: 3
-      resize_factor: 0.75
+      resize_factor: 0.5
       model_thinking: true
+      max_tokens_no_thinking: 128
     max_steps: 10
+
 
   logs:
     root: "../exploration/explored_apps/alibaba_harmony"

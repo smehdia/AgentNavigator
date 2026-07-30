@@ -1,20 +1,18 @@
-
 default:
 
   debug_mode: False
 
   app:
-    name: "Amazon"
-    description: "Amazon is an online shopping platform that allows users to buy and sell products online."
+    name: "Baidu"
+    description: "The Baidu App is the flagship mobile product of China's dominant search engine, serving as a comprehensive \"search-plus-feed\" portal."
 
   driver:
-    device_id: "R3CX20L5N6F"
-    os_name: "android"
-    appPackage: "com.amazon.mShop.android.shopping"
-    appActivity: "com.amazon.mShop.home.HomeActivity"
-    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Amazon app package (e.g., after navigating away).
-    # reset_instruction: "Return to the Amazon home screen. If already there, just return Finish."
-
+    device_id: "3AP0224B05003112"
+    os_name: "harmony"
+    appPackage: "com.baidu.baiduapp"
+    appActivity: "EntryAbility"
+    skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Baidu app package (e.g., after navigating away).
+    reset_instruction: "Go to the 百度 (Home) tab (left most tab in the bottom navigation bar) if there is an advertisement or pop up close it. On the top bar select Recommended (推荐)."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -33,15 +31,14 @@ default:
     max_steps: 10
 
   logs:
-    root: "../exploration/explored_apps/amazon"
+    root: "../exploration/explored_apps/baidu_harmony"
     resume_from_checkpoint: true
 
   batch_mode: true
   output_dir: "./results"
 
   use_memory_for_navigation: true
-  query: "Navigate to view saved addresses."
+  query: "Navigate to view my browsing history."
   top_k_in_first_stage_retrieval: 30
   top_k_retrieval_in_stage_2: 5
   pick_candidate_index: 0    # 0 means best candidate, 1 means second best, ... -1 means use gradio to pick candidate  (has to be less than top_k_retrieval_in_stage_2)
-
