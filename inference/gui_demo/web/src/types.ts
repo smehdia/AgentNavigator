@@ -61,8 +61,29 @@ export interface Candidate {
 
 export interface StepTiming {
   driver_screenshot_s?: number;
+  localization_s?: number;
   model_prediction_s?: number;
   other_processing_s?: number;
+}
+
+export interface LocalizationMatch {
+  node_id: string;
+  score: number;
+  next_node_id?: string | null;
+}
+
+export interface TransitionHint {
+  high_level?: string;
+  low_level?: string;
+}
+
+export interface LocalizationResult {
+  on_graph: boolean;
+  ood_label: number;
+  at_target?: boolean;
+  top3: LocalizationMatch[];
+  next_hops?: LocalizationMatch[];
+  transition_hints?: TransitionHint[];
 }
 
 export interface ChatMessage {
@@ -70,11 +91,13 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system" | "step" | "candidates" | "plan";
   content: string;
   prompt?: string;
+  navigationPlan?: string;
   imageB64?: string;
   annotatedB64?: string;
   actionType?: string;
   step?: number;
   timing?: StepTiming;
+  localization?: LocalizationResult;
   candidates?: Candidate[];
   selectedNodeId?: string;
 }

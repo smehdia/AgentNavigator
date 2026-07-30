@@ -78,15 +78,85 @@ function formatTimingSeconds(value: number | undefined): string {
   return value.toFixed(2);
 }
 
-function StepTimingBreakdown({ timing }: { timing?: { driver_screenshot_s?: number; model_prediction_s?: number; other_processing_s?: number } }) {
+function StepTimingBreakdown({ timing }: { timing?: { driver_screenshot_s?: number; localization_s?: number; model_prediction_s?: number; other_processing_s?: number } }) {
   if (!timing) {
     return null;
   }
   return (
     <div className="mt-3 pt-2 border-t border-slate-200 text-[11px] font-mono text-slate-500 space-y-0.5">
       <div>driver screenshot: {formatTimingSeconds(timing.driver_screenshot_s)} sec</div>
+      {timing.localization_s != null && (
+        <div>localization: {formatTimingSeconds(timing.localization_s)} sec</div>
+      )}
       <div>model prediction: {formatTimingSeconds(timing.model_prediction_s)} sec</div>
       <div>other processing: {formatTimingSeconds(timing.other_processing_s)} sec</div>
+    </div>
+  );
+}
+
+function LocalizationPanel({ localization }: { localization?: import("../types").LocalizationResult }) {
+  if (!localization) return null;
+  const top3 = localization.top3 || [];
+  const hops = localization.next_hops || [];
+  const hints = localization.transition_hints || [];
+  return (
+    <div className="mb-3 rounded-lg border border-slate-200 bg-slate-50 p-2.5 space-y-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+        Localization
+      </div>
+      <div className="text-xs font-mono text-slate-600">
+        {localization.on_graph ? (
+          <span className="text-emerald-700 font-semibold">On graph</span>
+        ) : (
+          <span className="text-sky-700 font-semibold">Off graph</span>
+        )}
+        {localization.at_target ? " · at target" : ""}
+      </div>
+      {top3.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold text-slate-400 mb-1">Top-3 matches</div>
+          <ul className="text-xs font-mono text-slate-700 space-y-0.5">
+            {top3.map((m) => (
+              <li key={m.node_id}>
+                {m.node_id} · {m.score.toFixed(3)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {hops.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold text-slate-400 mb-1">Next hops</div>
+          <ul className="text-xs font-mono text-slate-700 space-y-0.5">
+            {hops.map((h) => (
+              <li key={`${h.node_id}->${h.next_node_id}`}>
+                {h.node_id} → {h.next_node_id ?? "—"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {hints.length > 0 && (
+        <div>
+          <div className="text-[10px] font-semibold text-slate-400 mb-1">Transition hints</div>
+          <ul className="text-xs text-slate-700 space-y-1">
+            {hints.map((h, i) => (
+              <li key={i} className="border-l-2 border-accent/40 pl-2">
+                {h.high_level && (
+                  <div>
+                    <span className="text-slate-400">High:</span> {h.high_level}
+                  </div>
+                )}
+                {h.low_level && (
+                  <div>
+                    <span className="text-slate-400">Low:</span> {h.low_level}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -247,6 +317,7 @@ export default function ChatPanel({
               {msg.role === "step" && msg.step != null && (
                 <div className="text-xs font-semibold text-accent mb-1">Step {msg.step}</div>
               )}
+              {msg.role === "step" && <LocalizationPanel localization={msg.localization} />}
               {msg.actionType && (
                 <div className="text-xs font-mono text-slate-500 mb-1">Action: {msg.actionType}</div>
               )}

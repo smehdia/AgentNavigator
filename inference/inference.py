@@ -17,6 +17,12 @@ import argparse
 import numpy as np
 import gradio as gr
 import glob
+import joblib
+
+
+import torch
+from PIL import Image
+from transformers import AutoModel, AutoProcessor, AutoModelForImageTextToText
 
 import networkx as nx
 
@@ -25,6 +31,17 @@ for var in ["http_proxy", "https_proxy", "ftp_proxy", "socks_proxy",
     os.environ.pop(var, None)
 
 from FlagEmbedding import BGEM3FlagModel
+
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "exploration"))
+from train_localizer import ood_features, _letterbox
+
+SIGLIP_ID = "google/siglip-base-patch16-224"
+SMOLVLM_ID = "HuggingFaceTB/SmolVLM-256M-Instruct"
+SIGLIP_DIM = 768  # first half of siglip_smolvlm_features.pt gallery_z
+SMOL_DIM = 576
+CONCAT_DIM = SIGLIP_DIM + SMOL_DIM
+
 
 
 def retrieve_nodes_from_user_intents_embeddings(
@@ -181,114 +198,65 @@ def get_node_depths(G):
     return depths
 
 
-def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
+def format_navigation_plan(final_goal, transition_hints) -> str:
     """
-    Format navigation memory plans for UI-TARS.
+    Build the agent navigation prompt.
 
-    Notes:
-    - navigation_memory_plans may contain multiple alternative plans from different roots.
-    - The agent should first select the plan whose waypoints best match the current screenshot.
-    - Once the final goal is reached, the agent should finish immediately.
-    - If no plans are available, return an empty string so the caller can build the prompt without memory.
+    ``transition_hints``: up to 3 dicts with ``high_level`` / ``low_level`` for the
+    next hop. If empty, only the final goal is passed (no "no memory" message).
     """
-
-    if not isinstance(navigation_memory_plans, list):
-        raise TypeError("navigation_memory_plans must be a list")
     if not isinstance(final_goal, str):
         raise TypeError("final_goal must be a string")
+    if not isinstance(transition_hints, list):
+        raise TypeError("transition_hints must be a list")
 
-    if not navigation_memory_plans:
-        return (
-            "[Navigation Instruction]\n"
-            f"Final goal: {final_goal.strip() if final_goal.strip() else '(none)'}\n\n"
-            "No navigation memory is available for this task. "
-            "Use only the current screenshot and the user goal to decide the next action. "
-            "If the current screen already satisfies the final goal, do not perform more navigation actions. "
-            "Return the finish/done action immediately. "
-            "Don't leave the current application."
-        )
+    goal = final_goal.strip() if final_goal.strip() else "(none)"
+    if goal != "(none)" and not goal.lower().endswith("in the current application"):
+        goal = f"{goal} in the current application"
+    lines = [
+        "[Navigation Instruction]",
+        f"Final goal: {goal}",
+    ]
 
-    output_lines = []
+    if transition_hints:
+        lines += [
+            "",
+            "[Next-step transition hints]",
+            "Up to 3 candidate next transitions are listed below, each with a high-level "
+            "(intent) and low-level (visual) description. "
+            "Compare them to the current screenshot and follow the best-matching one, "
+            "unless there is a clear disagreement with what you see — then ignore the "
+            "hints and act from the screenshot and final goal. "
+            "Prefer low-level to locate the control; use high-level when the low-level "
+            "target is not visible.",
+            "",
+        ]
+        for i, hint in enumerate(transition_hints[:3], 1):
+            if isinstance(hint, dict):
+                low = str(hint.get("low_level", "")).strip()
+                high = str(hint.get("high_level", "")).strip()
+            else:
+                low, high = "", str(hint).strip()
+            lines.append(f"[Hint {i}]")
+            if high:
+                lines.append(f"High: {high}")
+            if low:
+                lines.append(f"Low: {low}")
+            if not high and not low:
+                lines.append("(empty)")
+            lines.append("")
 
-    output_lines.append("[Navigation Memory]")
-    output_lines.append(
-        "There are at most 3 semantically distinct navigation plans to reach the target screen. "
-        "Before acting, compare the current screenshot with the waypoint sequences and transition hints, "
-        "then follow the plan that best matches the current screen. "
-        "Each transition hint has low-level (visual) and high-level (intent) descriptions; "
-        "prefer low-level to locate controls, and use high-level when the low-level target is not visible. "
-        "Do not use root ids; match by visible UI state only. "
-        "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan. "
-        "All plans assume you start on the reset landing screen unless the screenshot clearly shows a blocker "
-        "(incognito, dialog, wrong tab). Ignore leading waypoints that don't match if you are already on the "
-        "shared landing screen."
-    )
-
-    for idx, plan in enumerate(navigation_memory_plans, 1):
-        output_lines.append("")
-        output_lines.append(f"[Plan {idx}]")
-
-        goal = plan.get("final_goal") if plan.get("final_goal") is not None else final_goal
-        goal = goal.strip() if isinstance(goal, str) else ""
-
-        output_lines.append(f"Final goal: {goal if goal else '(none)'}")
-
-        waypoints = plan.get("relevant_waypoint_sequence", [])
-        output_lines.append("\nRelevant waypoint sequence:")
-
-        if isinstance(waypoints, list) and waypoints:
-            wp_str = " -> ".join(str(w).strip() for w in waypoints if str(w).strip())
-            output_lines.append(wp_str if wp_str else "(none)")
-        else:
-            output_lines.append("(none)")
-
-        hints = plan.get("transition_hints", [])
-        output_lines.append("\nTransition hints:")
-
-        if isinstance(hints, list) and hints:
-            added_hint = False
-            for hint in hints:
-                if isinstance(hint, dict):
-                    low = str(hint.get("low_level", "")).strip()
-                    high = str(hint.get("high_level", "")).strip()
-                    if low and high:
-                        output_lines.append(f"- Low: {low}\n  High: {high}")
-                        added_hint = True
-                    elif low:
-                        output_lines.append(f"- Low: {low}")
-                        added_hint = True
-                    elif high:
-                        output_lines.append(f"- High: {high}")
-                        added_hint = True
-                else:
-                    hint_str = str(hint).strip()
-                    if hint_str:
-                        output_lines.append(f"- {hint_str}")
-                        added_hint = True
-            if not added_hint:
-                output_lines.append("(none)")
-        else:
-            output_lines.append("(none)")
-
-        usage_instruction = plan.get("usage_instruction")
-        if usage_instruction:
-            output_lines.append("\nPlan-specific usage instruction:")
-            output_lines.append(str(usage_instruction).strip())
-
-    output_lines.append("")
-    output_lines.append("[Global usage instruction]")
-    output_lines.append(
-        "First identify whether the current screenshot matches any plan. "
-        "Select the plan whose current or next waypoint best corresponds to the visible screen. "
+    lines += [
+        "[Global usage instruction]",
         "Then take the action that most likely advances to the next waypoint in that selected plan. "
         "Do not mix steps from different plans unless the screenshot clearly supports doing so. "
         "If the screenshot clearly disagrees with all plans, ignore the plans and follow the screenshot. "
         "Once the current screen already satisfies the final goal, do not perform more navigation actions. "
         "Return the finish/done action immediately. "
-        "Don't leave the current application."
-    )
+        "Don't leave the current application.",
+    ]
 
-    return "\n".join(output_lines).strip()
+    return "\n".join(lines).strip()
 
 
 def pick_candidate(candidates, screenshots_dir, user_query="", vlm_reasoning=None):
@@ -363,7 +331,7 @@ def get_task_prompts_dict_from_directory(input_dir):
     return task_prompts
 
 
-def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg):
+def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, localizer_embedder, ood_classifier, gallery_z, node_features, node_ids, target_hw, edge_level_information, dbg):
 
     if configs.use_memory_for_navigation:
         results = retrieve_nodes_from_user_intents_embeddings(
@@ -372,15 +340,6 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
             query=build_retrieval_query(task_prompt),
             top_k=configs.top_k_in_first_stage_retrieval,
         )
-
-
-        # for result in results:
-        #     node_id = result["node_id"]
-        #     img = cv2.imread(os.path.join(configs.logs.root, "screenshots", f"{node_id}.jpg"))
-        #     cv2.imshow('out', cv2.resize(img, None, fx=0.5, fy=0.5))
-        #     cv2.waitKey(0)
-        #     print(result)
-
 
         rerank_payload = build_rerank_candidates(
             task_prompt,
@@ -412,8 +371,6 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
             for c in candidates
         ]
 
-
-
         pick_candidate_index = getattr(configs, "pick_candidate_index", -1)
         print(f"pick_candidate_index: {pick_candidate_index}")
         if pick_candidate_index == -1:
@@ -430,15 +387,6 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
                 raise IndexError(f"pick_candidate_index {pick_candidate_index} is out of range for {len(candidates)} candidates.")
             selected_node_id = candidates[pick_candidate_index]["node_id"]
 
-        navigation_memory = get_ui_navigation_memory_for_node(node_navigation_plans, selected_node_id)
-    else:
-        navigation_memory = []
-        selected_node_id = None
-
-    navigation_memory = format_navigation_plan(navigation_memory, task_prompt)
-
-    dbg.log("Using Memory for Navigation: ", configs.use_memory_for_navigation)
-    dbg.log(f"Navigation memory: {navigation_memory}")
 
     driver.reset_to_start_page()
     agent.clear_history()
@@ -446,13 +394,82 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
 
     screenshots = []
     actions = []
-    screenshots.append(driver.take_screenshot())
+    # Pre-normalize gallery once (used every on-graph step).
+    G_gallery = np.asarray(node_features, dtype=np.float32)
+    G_gallery = G_gallery / (np.linalg.norm(G_gallery, axis=1, keepdims=True) + 1e-8)
 
     print("START NAVIGATION")
-    finish_flag = False
-    for _ in range(getattr(configs.agent, "max_steps", 10)):
-        s = time.time()
-        step_result, _ = agent.step(navigation_memory, driver.take_screenshot())
+    for step_i in range(getattr(configs.agent, "max_steps", 10)):
+        t_step = time.time()
+
+        t0 = time.time()
+        screenshot = driver.take_screenshot()
+        t_shot = time.time() - t0
+
+        t0 = time.time()
+        shot = _letterbox(screenshot, target_hw)
+        # OOD only needs SigLIP; skip SmolVLM encode when off-graph.
+        z = localizer_embedder.siglip_feat(shot)
+        ood_feat = ood_features(z, gallery_z)
+        ood_label = int(ood_classifier.predict(ood_feat.reshape(1, -1))[0])
+        transition_hints = []
+        top3 = []
+
+        if ood_label == 1:
+            dbg.log("On Graph", color="red")
+            smol = localizer_embedder.smol_vision_feat(shot)
+            screenshot_features = _l2(np.concatenate([z, smol], axis=0))
+            q = np.asarray(screenshot_features, dtype=np.float32).reshape(-1)
+            if q.size != G_gallery.shape[1]:
+                raise RuntimeError(
+                    f"feature dim mismatch: query={q.size}, gallery={G_gallery.shape[1]} "
+                    f"(expected {CONCAT_DIM}). Re-run save_screenshot_features for this app."
+                )
+            q = q / (np.linalg.norm(q) + 1e-8)
+            sims = G_gallery @ q
+            top = np.argsort(-sims)[:3]
+            top3 = [(node_ids[i], float(sims[i])) for i in top]
+            top_ids = {nid for nid, _ in top3}
+
+            if selected_node_id in top_ids:
+                t_loc = time.time() - t0
+                actions.append({
+                    "type": "finished",
+                    "coordinate": None,
+                    "thought": "The selected node is already in the top 3 nodes.",
+                })
+                screenshots.append(screenshot)
+                print(
+                    f"[step {step_i + 1}] at_target  "
+                    f"shot={t_shot:.2f}s loc={t_loc:.2f}s total={time.time() - t_step:.2f}s"
+                )
+                finish_flag = True
+                return screenshots, actions, finish_flag
+
+            for nid, score in top3:
+                try:
+                    path = nx.shortest_path(graph, nid, selected_node_id)
+                    nxt = path[1] if len(path) > 1 else nid
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    nxt = None
+                edge_info = edge_level_information.get("{}|{}".format(nid, nxt), [])
+                if isinstance(edge_info, list):
+                    edge_info = edge_info[0] if edge_info else {}
+                if not isinstance(edge_info, dict):
+                    edge_info = {}
+                transition_hints.append({
+                    "low_level": edge_info.get("low_level_action_description", ""),
+                    "high_level": edge_info.get("high_level_action_description", ""),
+                })
+        else:
+            dbg.log("Not on Graph", color="blue")
+
+        t_loc = time.time() - t0
+        navigation_plan = format_navigation_plan(task_prompt, transition_hints)
+
+        t0 = time.time()
+        step_result, _ = agent.step(navigation_plan, screenshot)
+        t_agent = time.time() - t0
         parsed = step_result[0] if isinstance(step_result, tuple) else step_result
 
         action_type = getattr(parsed, "action_type", None) or ""
@@ -466,19 +483,31 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
         actions.append({
             "type": action_type,
             "coordinate": coords,
-            "thought": thought
+            "thought": thought,
         })
+        screenshots.append(screenshot)
 
-        print(f"Action: type={action_type}, coordinate={coords}, thought={thought}")
+        print(f"Action: type={action_type}, coordinate={coords}")
+        if top3:
+            print("  top3:", [(n, round(s, 3)) for n, s in top3])
 
-        dbg.log(f"Time per step: {time.time() - s} seconds", color="green")
         if str(action_type).strip().lower() in ("finished", "finish"):
+            print(
+                f"[step {step_i + 1}] finish  "
+                f"shot={t_shot:.2f}s loc={t_loc:.2f}s agent={t_agent:.2f}s "
+                f"total={time.time() - t_step:.2f}s"
+            )
             finish_flag = True
             return screenshots, actions, finish_flag
-        else:
-            driver.execute_action(parsed)
-        driver.wait()
-        screenshots.append(driver.take_screenshot())
+
+        t0 = time.time()
+        driver.execute_action(parsed)
+        t_act = time.time() - t0
+        print(
+            f"[step {step_i + 1}]  "
+            f"shot={t_shot:.2f}s loc={t_loc:.2f}s agent={t_agent:.2f}s "
+            f"act={t_act:.2f}s total={time.time() - t_step:.2f}s"
+        )
 
     return screenshots, actions, finish_flag
 
@@ -535,6 +564,96 @@ def visualize_actions_on_screenshots(screenshots, actions):
     return annotated
 
 
+def _l2(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    if x.ndim == 1:
+        return x / (np.linalg.norm(x) + 1e-8)
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-8)
+
+
+class Encoders:
+    """Lazy SigLIP + SmolVLM vision encoders."""
+
+    def __init__(self, device: str = "cuda"):
+
+        self.device = device
+        self._Image = Image
+
+        self.siglip_proc = AutoProcessor.from_pretrained(SIGLIP_ID)
+        self.siglip = AutoModel.from_pretrained(
+            SIGLIP_ID, torch_dtype=torch.float16
+        ).to(device)
+        self.siglip.eval()
+
+        self.smol_proc = AutoProcessor.from_pretrained(SMOLVLM_ID)
+        self.smol = AutoModelForImageTextToText.from_pretrained(
+            SMOLVLM_ID,
+            torch_dtype=torch.float16,
+            _attn_implementation="eager",
+        ).to(device)
+        self.smol.eval()
+        self.image_token_id = getattr(self.smol.config, "image_token_id", None)
+
+    def _pil(self, bgr: np.ndarray):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return self._Image.fromarray(rgb)
+
+    @torch.inference_mode()
+    def siglip_feat(self, bgr: np.ndarray) -> np.ndarray:
+        pil = self._pil(bgr)
+        pixel_values = self.siglip_proc(images=pil, return_tensors="pt")["pixel_values"].to(
+            self.device
+        )
+        # Always use pooled projection — never flatten patch tokens (B, 196, 768).
+        pooled = self.siglip.vision_model(pixel_values=pixel_values).pooler_output
+        z = self.siglip.visual_projection(pooled) if hasattr(self.siglip, "visual_projection") else pooled
+        z = z[0].float().cpu().numpy().reshape(-1)
+        if z.size != SIGLIP_DIM:
+            raise RuntimeError(f"siglip_feat expected dim {SIGLIP_DIM}, got {z.size}")
+        return _l2(z)
+
+    @torch.inference_mode()
+    def smol_vision_feat(self, bgr: np.ndarray) -> np.ndarray:
+        """Mean-pool SmolVLM last-layer hidden states over image tokens only."""
+        pil = self._pil(bgr)
+        pil.thumbnail((512, 512))
+        msgs = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "Screenshot."},
+                ],
+            }
+        ]
+        prompt = self.smol_proc.apply_chat_template(msgs, add_generation_prompt=False)
+        inputs = self.smol_proc(text=prompt, images=[pil], return_tensors="pt")
+        inputs = {
+            k: v.to(self.device) if hasattr(v, "to") else v for k, v in inputs.items()
+        }
+        out = self.smol(**inputs, output_hidden_states=True, return_dict=True)
+        hs = out.hidden_states[-1][0]
+        input_ids = inputs["input_ids"][0]
+        if self.image_token_id is not None:
+            mask = input_ids == self.image_token_id
+            if bool(mask.any()):
+                z = hs[mask].mean(0).float().cpu().numpy().reshape(-1)
+                return _l2(z)
+        am = inputs["attention_mask"][0].bool()
+        z = hs[am].mean(0).float().cpu().numpy().reshape(-1)
+        return _l2(z)
+
+    def concat_feat(self, bgr: np.ndarray) -> np.ndarray:
+        sig = np.asarray(self.siglip_feat(bgr), dtype=np.float32).reshape(-1)
+        smol = np.asarray(self.smol_vision_feat(bgr), dtype=np.float32).reshape(-1)
+        if sig.size != SIGLIP_DIM or smol.size != SMOL_DIM:
+            raise RuntimeError(
+                f"concat_feat dims siglip={sig.size} (want {SIGLIP_DIM}), "
+                f"smol={smol.size} (want {SMOL_DIM})"
+            )
+        return _l2(np.concatenate([sig, smol], axis=0))
+
+
 if __name__ == "__main__":
     dbg = Debugger(palette="soft", indent_size=2, width=90)
 
@@ -573,38 +692,41 @@ if __name__ == "__main__":
     embeddings = np.asarray(embeddings, dtype=np.float32)
     embedding_model = BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
 
-    if batch_mode:
-        if output_dir is None:
-            raise ValueError("output_dir is required in batch mode")
-        task_prompts = get_task_prompts_dict_from_directory(configs.input_dir)
-
-        for task_name, task_prompt in task_prompts.items():
-            os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}"), exist_ok=True)
-            screenshots, actions, finish_flag = execute_single_task(task_prompt, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
-            annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
-            for i, screenshot in enumerate(annotated_screenshots):
-                os.makedirs(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "annotated_screenshots"), exist_ok=True)
-                cv2.imwrite(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "annotated_screenshots", f"{i}.jpg"), screenshot)
-            for i, screenshot in enumerate(screenshots):
-                cv2.imwrite(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", f"{i}.jpg"), screenshot)
-            with open(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "actions.json"), "w", encoding="utf-8") as f:
-                json.dump(actions, f)
-            with open(os.path.join(output_dir, f"{task_name}_{configs.pick_candidate_index}", "prompt.json"), "w", encoding="utf-8") as f:
-                json.dump({"query": task_prompt}, f)
-
+    localizer_embedder = Encoders(device="cuda")
+    ood_payload = joblib.load(os.path.join(configs.logs.root, "ood_classifier.joblib"))
+    ood_classifier = ood_payload["model"]
+    ood_threshold = ood_payload["threshold"]
+    feat_payload = torch.load(
+        os.path.join(configs.logs.root, "siglip_smolvlm_features.pt"),
+        map_location="cpu",
+        weights_only=False,
+    )
+    node_features = np.asarray(feat_payload["gallery_z"], dtype=np.float32)
+    feat_node_ids = list(feat_payload["node_ids"])
+    if node_features.ndim != 2 or node_features.shape[1] != CONCAT_DIM:
+        raise RuntimeError(
+            f"siglip_smolvlm_features.pt has dim {getattr(node_features, 'shape', None)}; "
+            f"expected (*, {CONCAT_DIM}). Re-save features for this app with train_localizer."
+        )
+    # OOD profile uses SigLIP half of concat(siglip, smolvlm)
+    gallery_z = node_features[:, :SIGLIP_DIM]
+    target_hw = tuple(feat_payload["target_hw"])
+    
+    if configs.query:
+        user_query = configs.query
     else:
-        if configs.query:
-            user_query = configs.query
-        else:
-            user_query = input("Enter your query: ")
+        user_query = input("Enter your query: ")
 
-        screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, dbg)
-        annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
-        if output_dir:
-            os.makedirs(output_dir, exist_ok=True)
-            for i, screenshot in enumerate(annotated_screenshots):
-                cv2.imwrite(os.path.join(output_dir, f"{i}.jpg"), screenshot)
-            with open(os.path.join(output_dir, "actions.json"), "w", encoding="utf-8") as f:
-                json.dump(actions, f)
-            with open(os.path.join(output_dir, "prompt.json"), "w", encoding="utf-8") as f:
-                json.dump({"query": user_query}, f)
+    with open(os.path.join(configs.logs.root, "edge_level_information.json"), "r", encoding="utf-8") as f:
+        edge_level_information = json.load(f)
+
+    screenshots, actions, finish_flag = execute_single_task(user_query, configs, graph, depths, node_intents, node_level_information, node_navigation_plans, embeddings, embedding_model, vlm_client, agent, driver, localizer_embedder, ood_classifier, gallery_z, node_features, feat_node_ids, target_hw, edge_level_information, dbg)
+    annotated_screenshots = visualize_actions_on_screenshots(screenshots, actions)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        for i, screenshot in enumerate(annotated_screenshots):
+            cv2.imwrite(os.path.join(output_dir, f"{i}.jpg"), screenshot)
+        with open(os.path.join(output_dir, "actions.json"), "w", encoding="utf-8") as f:
+            json.dump(actions, f)
+        with open(os.path.join(output_dir, "prompt.json"), "w", encoding="utf-8") as f:
+            json.dump({"query": user_query}, f)

@@ -43,7 +43,7 @@ from VLM_Yibu import build_vlm_client
 from .pipeline import (
     encode_image_jpeg_b64,
     format_candidate_label,
-    get_navigation_memory_for_node,
+    format_navigation_plan,
     load_artifacts,
     run_navigation_loop,
     run_retrieval,
@@ -185,6 +185,7 @@ class InferenceSession:
         self.reset_to_start_page: bool = True
         self.model_thinking: bool = True
         self.navigation_memory_override: Optional[str] = None
+        self.localizer: Optional[dict[str, Any]] = None
 
     def driver_settings(self) -> dict:
         d = dict(self.config.get("driver", {}))
@@ -530,6 +531,7 @@ async def resources_load_stream() -> StreamingResponse:
             ("node_level_information", "Loading node_level_information.json"),
             ("node_navigation_plans", "Loading node_navigation_plans.json"),
             ("embeddings", "Building embedding matrix"),
+            ("localizer", "Loading SigLIP/SmolVLM localizer + OOD model"),
             ("bge_model", "Loading BGE-M3 embedding model"),
             ("vlm", "Initializing VLM client"),
             ("agent", "Connecting to agent server"),
@@ -566,6 +568,13 @@ async def resources_load_stream() -> StreamingResponse:
             )
             session.load_status["embeddings"] = "done"
             yield _sse_event("progress", {"key": "embeddings", "label": "Embedding matrix ready", "status": "done"})
+
+            session.localizer = await asyncio.to_thread(_load_localizer, logs_root, session.ctx.graph)
+            session.load_status["localizer"] = "done"
+            yield _sse_event(
+                "progress",
+                {"key": "localizer", "label": "Localizer + OOD ready", "status": "done"},
+            )
 
             session.embedding_model = await asyncio.to_thread(
                 lambda: BGEM3FlagModel("BAAI/bge-m3", use_fp16=True)
@@ -692,12 +701,7 @@ def navigation_memory(body: NavigationMemoryRequest) -> dict:
         raise HTTPException(400, "Resources not loaded")
     node_id = body.node_id or session.selected_node_id
     query = body.query or session.current_query
-    cfg = _config_object()
-    if getattr(cfg, "use_memory_for_navigation", False) and node_id:
-        memory = get_navigation_memory_for_node(session.ctx, node_id, query)
-    else:
-        from .pipeline import format_navigation_plan
-        memory = format_navigation_plan([], query)
+    memory = format_navigation_plan(query, [])
     return {"memory": memory, "node_id": node_id, "query": query}
 
 
@@ -709,11 +713,61 @@ def navigation_memory(body: NavigationMemoryRequest) -> dict:
 def _resolve_navigation_memory(query: str, node_id: Optional[str], override: Optional[str] = None) -> str:
     if override:
         return override
-    cfg = _config_object()
-    if getattr(cfg, "use_memory_for_navigation", False) and node_id and session.ctx:
-        return get_navigation_memory_for_node(session.ctx, node_id, query)
-    from .pipeline import format_navigation_plan
-    return format_navigation_plan([], query)
+    return format_navigation_plan(query, [])
+
+
+def _load_localizer(logs_root: str, graph) -> dict[str, Any]:
+    import joblib
+    import torch
+    import sys
+
+    exploration_dir = str(INFERENCE_DIR.parent / "exploration")
+    if exploration_dir not in sys.path:
+        sys.path.insert(0, exploration_dir)
+    if str(INFERENCE_DIR) not in sys.path:
+        sys.path.insert(0, str(INFERENCE_DIR))
+
+    from train_localizer import ood_features, _letterbox
+    import inference as inf_mod
+
+    ood_path = os.path.join(logs_root, "ood_classifier.joblib")
+    feat_path = os.path.join(logs_root, "siglip_smolvlm_features.pt")
+    edge_path = os.path.join(logs_root, "edge_level_information.json")
+    if not os.path.isfile(ood_path):
+        raise FileNotFoundError(f"Missing {ood_path}")
+    if not os.path.isfile(feat_path):
+        raise FileNotFoundError(f"Missing {feat_path}")
+
+    ood_payload = joblib.load(ood_path)
+    feat_payload = torch.load(feat_path, map_location="cpu", weights_only=False)
+    node_features = np.asarray(feat_payload["gallery_z"], dtype=np.float32)
+    concat_dim = int(getattr(inf_mod, "CONCAT_DIM", 1344))
+    if node_features.ndim != 2 or node_features.shape[1] != concat_dim:
+        raise RuntimeError(
+            f"siglip_smolvlm_features.pt has shape {node_features.shape}; "
+            f"expected (*, {concat_dim}). Re-save features for this app."
+        )
+    edge_level = {}
+    if os.path.isfile(edge_path):
+        with open(edge_path, "r", encoding="utf-8") as f:
+            edge_level = json.load(f)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    embedder = inf_mod.Encoders(device=device)
+    return {
+        "embedder": embedder,
+        "ood_classifier": ood_payload["model"],
+        "ood_threshold": ood_payload.get("threshold"),
+        "gallery_z": node_features[:, : int(getattr(inf_mod, "SIGLIP_DIM", 768))],
+        "node_features": node_features,
+        "feat_node_ids": list(feat_payload["node_ids"]),
+        "target_hw": tuple(feat_payload["target_hw"]),
+        "graph": graph,
+        "edge_level_information": edge_level if isinstance(edge_level, dict) else {},
+        "letterbox_fn": _letterbox,
+        "ood_features_fn": ood_features,
+        "concat_dim": concat_dim,
+    }
 
 
 @app.post("/api/execute/start")
@@ -767,11 +821,7 @@ async def ws_execution(websocket: WebSocket) -> None:
     node_id = session.selected_node_id
     cfg = _config_object()
 
-    navigation_memory = _resolve_navigation_memory(
-        query,
-        node_id,
-        session.navigation_memory_override,
-    )
+    final_goal = (session.navigation_memory_override or "").strip() or query
 
     max_steps = getattr(getattr(cfg, "agent", None), "max_steps", 10) or 10
     _apply_model_thinking(session.agent, session.model_thinking)
@@ -790,13 +840,15 @@ async def ws_execution(websocket: WebSocket) -> None:
         try:
             return await asyncio.to_thread(
                 run_navigation_loop,
-                navigation_memory,
+                final_goal,
                 session.agent,
                 session.driver,
                 max_steps,
                 on_step,
                 session.reset_to_start_page,
                 should_stop,
+                selected_node_id=node_id,
+                localizer=session.localizer,
             )
         finally:
             session._executing = False
@@ -829,19 +881,30 @@ async def ws_execution(websocket: WebSocket) -> None:
             annotated = annotated_list[0] if annotated_list else screenshot
 
             timing = payload.get("timing") or action.get("timing") or {}
+            localization = payload.get("localization") or {}
             await websocket.send_json(
                 {
                     "type": "step",
                     "step": step_num,
                     "prompt": payload.get("prompt") or action.get("prompt", ""),
+                    "navigation_plan": payload.get("navigation_plan") or "",
                     "thought": action.get("thought", ""),
                     "action_type": action.get("type", ""),
                     "coordinate": action.get("coordinate"),
                     "screenshot_b64": encode_image_jpeg_b64(screenshot),
                     "annotated_b64": encode_image_jpeg_b64(annotated),
                     "driver_screenshot_s": timing.get("driver_screenshot_s"),
+                    "localization_s": timing.get("localization_s"),
                     "model_prediction_s": timing.get("model_prediction_s"),
                     "other_processing_s": timing.get("other_processing_s"),
+                    "localization": {
+                        "on_graph": bool(localization.get("on_graph")),
+                        "ood_label": int(localization.get("ood_label") or 0),
+                        "at_target": bool(localization.get("at_target")),
+                        "top3": localization.get("top3") or [],
+                        "next_hops": localization.get("next_hops") or [],
+                        "transition_hints": localization.get("transition_hints") or [],
+                    },
                 }
             )
 

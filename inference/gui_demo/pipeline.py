@@ -124,99 +124,153 @@ def get_node_depths(G: nx.Graph) -> dict:
     return depths
 
 
-def format_navigation_plan(navigation_memory_plans, final_goal) -> str:
-    if not isinstance(navigation_memory_plans, list):
-        raise TypeError("navigation_memory_plans must be a list")
+def format_navigation_plan(final_goal, transition_hints) -> str:
+    """
+    Build the agent navigation prompt.
+
+    ``transition_hints``: up to 3 dicts with ``high_level`` / ``low_level`` for the
+    next hop. If empty, only the final goal is passed (no "no memory" message).
+    """
     if not isinstance(final_goal, str):
         raise TypeError("final_goal must be a string")
+    if not isinstance(transition_hints, list):
+        raise TypeError("transition_hints must be a list")
 
-    if not navigation_memory_plans:
-        return (
-            "[Navigation Instruction]\n"
-            f"Final goal: {final_goal.strip() if final_goal.strip() else '(none)'}\n\n"
-            "No navigation memory is available for this task. "
-            "Use only the current screenshot and the user goal to decide the next action. "
-            "If the current screen already satisfies the final goal, do not perform more navigation actions. "
-            "Return the finish/done action immediately. "
-            "Don't leave the current application."
-        )
+    goal = final_goal.strip() if final_goal.strip() else "(none)"
+    if goal != "(none)" and not goal.lower().endswith("in the current application"):
+        goal = f"{goal} in the current application"
+    lines = [
+        "[Navigation Instruction]",
+        f"Final goal: {goal}",
+    ]
 
-    output_lines = []
-    output_lines.append("[Navigation Memory]")
-    output_lines.append(
-        "There are at most 3 semantically distinct navigation plans to reach the target screen. "
-        "Before acting, compare the current screenshot with the waypoint sequences and transition hints, "
-        "then follow the plan that best matches the current screen. "
-        "Each transition hint has low-level (visual) and high-level (intent) descriptions; "
-        "prefer low-level to locate controls, and use high-level when the low-level target is not visible. "
-        "Do not use root ids; match by visible UI state only. "
-        "If none of the plans match the current screenshot, rely on the screenshot instead of forcing a plan. "
-        "All plans assume you start on the reset landing screen unless the screenshot clearly shows a blocker "
-        "(incognito, dialog, wrong tab). Ignore leading waypoints that don't match if you are already on the "
-        "shared landing screen."
-    )
+    if transition_hints:
+        lines += [
+            "",
+            "[Next-step transition hints]",
+            "Up to 3 candidate next transitions are listed below, each with a high-level "
+            "(intent) and low-level (visual) description. "
+            "Compare them to the current screenshot and follow the best-matching one, "
+            "unless there is a clear disagreement with what you see — then ignore the "
+            "hints and act from the screenshot and final goal. "
+            "Prefer low-level to locate the control; use high-level when the low-level "
+            "target is not visible.",
+            "",
+        ]
+        for i, hint in enumerate(transition_hints[:3], 1):
+            if isinstance(hint, dict):
+                low = str(hint.get("low_level", "")).strip()
+                high = str(hint.get("high_level", "")).strip()
+            else:
+                low, high = "", str(hint).strip()
+            lines.append(f"[Hint {i}]")
+            if high:
+                lines.append(f"High: {high}")
+            if low:
+                lines.append(f"Low: {low}")
+            if not high and not low:
+                lines.append("(empty)")
+            lines.append("")
 
-    for idx, plan in enumerate(navigation_memory_plans, 1):
-        output_lines.append("")
-        output_lines.append(f"[Plan {idx}]")
-
-        goal = plan.get("final_goal") if plan.get("final_goal") is not None else final_goal
-        goal = goal.strip() if isinstance(goal, str) else ""
-        output_lines.append(f"Final goal: {goal if goal else '(none)'}")
-
-        waypoints = plan.get("relevant_waypoint_sequence", [])
-        output_lines.append("\nRelevant waypoint sequence:")
-        if isinstance(waypoints, list) and waypoints:
-            wp_str = " -> ".join(str(w).strip() for w in waypoints if str(w).strip())
-            output_lines.append(wp_str if wp_str else "(none)")
-        else:
-            output_lines.append("(none)")
-
-        hints = plan.get("transition_hints", [])
-        output_lines.append("\nTransition hints:")
-        if isinstance(hints, list) and hints:
-            added_hint = False
-            for hint in hints:
-                if isinstance(hint, dict):
-                    low = str(hint.get("low_level", "")).strip()
-                    high = str(hint.get("high_level", "")).strip()
-                    if low and high:
-                        output_lines.append(f"- Low: {low}\n  High: {high}")
-                        added_hint = True
-                    elif low:
-                        output_lines.append(f"- Low: {low}")
-                        added_hint = True
-                    elif high:
-                        output_lines.append(f"- High: {high}")
-                        added_hint = True
-                else:
-                    hint_str = str(hint).strip()
-                    if hint_str:
-                        output_lines.append(f"- {hint_str}")
-                        added_hint = True
-            if not added_hint:
-                output_lines.append("(none)")
-        else:
-            output_lines.append("(none)")
-
-        usage_instruction = plan.get("usage_instruction")
-        if usage_instruction:
-            output_lines.append("\nPlan-specific usage instruction:")
-            output_lines.append(str(usage_instruction).strip())
-
-    output_lines.append("")
-    output_lines.append("[Global usage instruction]")
-    output_lines.append(
-        "First identify whether the current screenshot matches any plan. "
-        "Select the plan whose current or next waypoint best corresponds to the visible screen. "
+    lines += [
+        "[Global usage instruction]",
         "Then take the action that most likely advances to the next waypoint in that selected plan. "
         "Do not mix steps from different plans unless the screenshot clearly supports doing so. "
         "If the screenshot clearly disagrees with all plans, ignore the plans and follow the screenshot. "
         "Once the current screen already satisfies the final goal, do not perform more navigation actions. "
         "Return the finish/done action immediately. "
-        "Don't leave the current application."
-    )
-    return "\n".join(output_lines).strip()
+        "Don't leave the current application.",
+    ]
+
+    return "\n".join(lines).strip()
+
+
+def _edge_hint(edge_level_information: dict, src: str, dst: str | None) -> dict:
+    if not dst:
+        return {"low_level": "", "high_level": ""}
+    edge_info = edge_level_information.get(f"{src}|{dst}", [])
+    if isinstance(edge_info, list):
+        edge_info = edge_info[0] if edge_info else {}
+    if not isinstance(edge_info, dict):
+        edge_info = {}
+    return {
+        "low_level": edge_info.get("low_level_action_description", ""),
+        "high_level": edge_info.get("high_level_action_description", ""),
+    }
+
+
+def localize_screenshot(
+    screenshot: np.ndarray,
+    *,
+    localizer_embedder,
+    ood_classifier,
+    gallery_z: np.ndarray,
+    node_features: np.ndarray,
+    feat_node_ids: list,
+    target_hw: tuple,
+    graph,
+    selected_node_id: str | None,
+    edge_level_information: dict,
+    letterbox_fn,
+    ood_features_fn,
+    concat_dim: int,
+    gallery_norm: np.ndarray | None = None,
+) -> dict:
+    """OOD check + top-3 cosine match + next-hop transition hints (inference.py parity)."""
+    shot = letterbox_fn(screenshot, target_hw)
+    # OOD only needs SigLIP; skip SmolVLM when off-graph.
+    z = localizer_embedder.siglip_feat(shot)
+    ood_feat = ood_features_fn(z, gallery_z)
+    ood_label = int(ood_classifier.predict(ood_feat.reshape(1, -1))[0])
+
+    out: dict[str, Any] = {
+        "on_graph": ood_label == 1,
+        "ood_label": ood_label,
+        "top3": [],
+        "next_hops": [],
+        "transition_hints": [],
+        "at_target": False,
+    }
+    if ood_label != 1:
+        return out
+
+    smol = localizer_embedder.smol_vision_feat(shot)
+    q = np.concatenate([z, smol], axis=0).astype(np.float32)
+    q = q / (np.linalg.norm(q) + 1e-8)
+    G = gallery_norm
+    if G is None:
+        G = np.asarray(node_features, dtype=np.float32)
+        G = G / (np.linalg.norm(G, axis=1, keepdims=True) + 1e-8)
+    if q.size != G.shape[1]:
+        raise RuntimeError(
+            f"feature dim mismatch: query={q.size}, gallery={G.shape[1]} "
+            f"(expected {concat_dim}). Re-run save_screenshot_features for this app."
+        )
+    sims = G @ q
+    top = np.argsort(-sims)[:3]
+    top3 = [(feat_node_ids[i], float(sims[i])) for i in top]
+    out["top3"] = [{"node_id": nid, "score": score} for nid, score in top3]
+
+    top_ids = {nid for nid, _ in top3}
+    if selected_node_id and selected_node_id in top_ids:
+        out["at_target"] = True
+        return out
+
+    next_hops = []
+    hints = []
+    for nid, score in top3:
+        nxt = None
+        if selected_node_id:
+            try:
+                path = nx.shortest_path(graph, nid, selected_node_id)
+                nxt = path[1] if len(path) > 1 else nid
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                nxt = None
+        next_hops.append({"node_id": nid, "score": score, "next_node_id": nxt})
+        hints.append(_edge_hint(edge_level_information, nid, nxt))
+    out["next_hops"] = next_hops
+    out["transition_hints"] = hints
+    return out
 
 
 def retrieve_nodes_from_user_intents_embeddings(
@@ -574,27 +628,35 @@ def run_retrieval(
 
 
 def get_navigation_memory_for_node(ctx: RetrievalContext, node_id: str, query: str) -> str:
-    raw = get_ui_navigation_memory_for_node(ctx, node_id)
-    return format_navigation_plan(raw, query)
+    # Static pre-execute preview: goal only. Live steps build hints via localization.
+    return format_navigation_plan(query, [])
 
 
 def run_navigation_loop(
-    navigation_memory: str,
+    final_goal: str,
     agent,
     driver,
     max_steps: int = 10,
     on_step: Optional[Callable[[dict], None]] = None,
     reset_first: bool = True,
     should_stop: Optional[Callable[[], bool]] = None,
+    *,
+    selected_node_id: Optional[str] = None,
+    localizer=None,
 ) -> tuple[list, list, bool, bool]:
     if reset_first:
         driver.reset_to_start_page()
     agent.clear_history()
 
-    screenshots = [driver.take_screenshot()]
+    screenshots = []
     actions = []
     finish_flag = False
     stopped = False
+
+    gallery_norm = None
+    if localizer is not None:
+        nf = np.asarray(localizer["node_features"], dtype=np.float32)
+        gallery_norm = nf / (np.linalg.norm(nf, axis=1, keepdims=True) + 1e-8)
 
     for step_idx in range(max_steps):
         if should_stop and should_stop():
@@ -605,22 +667,104 @@ def run_navigation_loop(
         screenshot = driver.take_screenshot()
         driver_screenshot_s = time.time() - step_start
 
+        loc_start = time.time()
+        localization = {
+            "on_graph": False,
+            "ood_label": 0,
+            "top3": [],
+            "next_hops": [],
+            "transition_hints": [],
+            "at_target": False,
+        }
+        if localizer is not None:
+            localization = localize_screenshot(
+                screenshot,
+                localizer_embedder=localizer["embedder"],
+                ood_classifier=localizer["ood_classifier"],
+                gallery_z=localizer["gallery_z"],
+                node_features=localizer["node_features"],
+                feat_node_ids=localizer["feat_node_ids"],
+                target_hw=localizer["target_hw"],
+                graph=localizer["graph"],
+                selected_node_id=selected_node_id,
+                edge_level_information=localizer.get("edge_level_information") or {},
+                letterbox_fn=localizer["letterbox_fn"],
+                ood_features_fn=localizer["ood_features_fn"],
+                concat_dim=localizer["concat_dim"],
+                gallery_norm=gallery_norm,
+            )
+        localization_s = time.time() - loc_start
+
+        if localization.get("at_target"):
+            action_record = {
+                "type": "finished",
+                "coordinate": None,
+                "direction": None,
+                "start_coordinate": None,
+                "end_coordinate": None,
+                "thought": "Selected node is already among the top-3 localized matches.",
+                "prompt": "",
+                "timing": {
+                    "driver_screenshot_s": driver_screenshot_s,
+                    "localization_s": localization_s,
+                    "model_prediction_s": 0.0,
+                    "action_s": 0.0,
+                    "other_processing_s": 0.0,
+                },
+            }
+            actions.append(action_record)
+            screenshots.append(screenshot)
+            if on_step:
+                on_step(
+                    {
+                        "step": step_idx + 1,
+                        "action": action_record,
+                        "prompt": "",
+                        "elapsed_s": time.time() - step_start,
+                        "timing": action_record["timing"],
+                        "screenshot": screenshot,
+                        "parsed": None,
+                        "localization": localization,
+                        "navigation_plan": format_navigation_plan(final_goal, []),
+                    }
+                )
+            print(
+                f"[step {step_idx + 1}] at_target  "
+                f"shot={driver_screenshot_s:.2f}s loc={localization_s:.2f}s "
+                f"total={time.time() - step_start:.2f}s"
+            )
+            finish_flag = True
+            break
+
+        hints = localization.get("transition_hints") or []
+        navigation_plan = format_navigation_plan(final_goal, hints)
+
         model_start = time.time()
-        step_result, _ = agent.step(navigation_memory, screenshot)
+        step_result, _ = agent.step(navigation_plan, screenshot)
         model_prediction_s = time.time() - model_start
         prompt = get_agent_last_prompt(agent)
 
         other_start = time.time()
         parsed_action = parse_action_from_step(step_result)
+        other_processing_s = time.time() - other_start
 
         if should_stop and should_stop():
             stopped = True
             break
 
+        action_type = str(parsed_action["type"]).strip().lower()
+        action_s = 0.0
+        if action_type not in ("finished", "finish"):
+            act_start = time.time()
+            driver.execute_action(parsed_action["parsed"])
+            action_s = time.time() - act_start
+
         timing = {
             "driver_screenshot_s": driver_screenshot_s,
+            "localization_s": localization_s,
             "model_prediction_s": model_prediction_s,
-            "other_processing_s": time.time() - other_start,
+            "action_s": action_s,
+            "other_processing_s": other_processing_s,
         }
 
         action_record = {
@@ -634,32 +778,36 @@ def run_navigation_loop(
             "timing": timing,
         }
         actions.append(action_record)
+        screenshots.append(screenshot)
+
+        elapsed = time.time() - step_start
+        print(
+            f"[step {step_idx + 1}]  "
+            f"shot={driver_screenshot_s:.2f}s loc={localization_s:.2f}s "
+            f"agent={model_prediction_s:.2f}s act={action_s:.2f}s total={elapsed:.2f}s"
+        )
 
         step_payload = {
             "step": step_idx + 1,
             "action": action_record,
             "prompt": prompt,
-            "elapsed_s": time.time() - step_start,
+            "elapsed_s": elapsed,
             "timing": timing,
             "screenshot": screenshot,
             "parsed": parsed_action["parsed"],
+            "localization": localization,
+            "navigation_plan": navigation_plan,
         }
         if on_step:
             on_step(step_payload)
 
-        action_type = str(parsed_action["type"]).strip().lower()
         if action_type in ("finished", "finish"):
             finish_flag = True
-            screenshots.append(driver.take_screenshot())
             break
 
         if should_stop and should_stop():
             stopped = True
             break
-
-        driver.execute_action(parsed_action["parsed"])
-        driver.wait()
-        screenshots.append(driver.take_screenshot())
 
     return screenshots, actions, finish_flag, stopped
 

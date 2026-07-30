@@ -4,6 +4,8 @@ set -e
 cd "$(dirname "$0")"
 
 # Driver temp screenshots (e.g. __agentnav_*.jpeg) are written in this directory.
+# Localization needs exploration/ on PYTHONPATH (ood_features, letterbox) and this dir (inference.py encoders).
+export PYTHONPATH="$(pwd):$(pwd)/../exploration${PYTHONPATH:+:$PYTHONPATH}"
 
 usage() {
   cat <<'EOF'
@@ -19,6 +21,11 @@ Options:
 Environment (when --save-trajectory-mp4 is set):
   AGENTNAV_TRAJECTORY_MP4_WIDTH   Frame width in pixels (default: 1920)
   AGENTNAV_TRAJECTORY_MP4_FPS      Playback FPS (default: 1)
+
+Requires under logs.root (same as CLI inference):
+  ood_classifier.joblib
+  siglip_smolvlm_features.pt   (dim 1344 = SigLIP 768 + SmolVLM 576)
+  edge_level_information.json
 
 Remaining arguments are passed to uvicorn (e.g. --reload --port 9000).
 EOF

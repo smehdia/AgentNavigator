@@ -67,6 +67,7 @@ const DEFAULT_LOAD_ITEMS: LoadItem[] = [
   { key: "node_level_information", label: "Node level information", status: "pending" },
   { key: "node_navigation_plans", label: "Navigation plans", status: "pending" },
   { key: "embeddings", label: "Embedding matrix", status: "pending" },
+  { key: "localizer", label: "Localizer + OOD", status: "pending" },
   { key: "bge_model", label: "BGE-M3 model", status: "pending" },
   { key: "vlm", label: "VLM client", status: "pending" },
   { key: "agent", label: "Agent server", status: "pending" },
