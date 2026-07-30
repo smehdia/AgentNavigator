@@ -1,8 +1,8 @@
 # Inference
 
-Run a natural-language navigation goal on a **physical device** using an explored app graph. Inference retrieves the best target screen from exploration artifacts, optionally lets you confirm the pick in a Gradio UI, then drives the UI agent step-by-step until the goal is reached.
+Run a natural-language navigation goal on a **physical device** using an explored app graph. Inference **retrieves** a target screen from exploration artifacts, then drives the UI agent step-by-step. Each step uses an **OOD classifier** (on/off-graph) and a **SigLIP+SmolVLM gallery localizer** to suggest next-hop transition hints to the agent.
 
-**Prerequisites:** Complete [exploration](../exploration/README.md) and **post-processing** for the same app so `logs.root` contains `graph.json`, `user_intents.json`, `node_level_information.json`, `node_navigation_plans.json`, and `screenshots/`.
+**Prerequisites:** Complete [exploration](../exploration/README.md), **post-processing**, and **localizer training** (`train_localizer.py`) for the same app so `logs.root` contains `graph.json`, `user_intents.json`, `node_level_information.json`, `edge_level_information.json`, `screenshots/`, `ood_classifier.joblib`, and `siglip_smolvlm_features.pt`.
 
 **Recommended for demos:** use the [Inference GUI](#inference-gui-demo-wizard) (`run_gui.sh`) — a browser wizard that walks through config, device checks, retrieval, and on-device navigation. For scripted or batch runs, use the [CLI](#quick-start-cli) (`inference.py`).
 
@@ -32,12 +32,13 @@ inference/
 
 | Requirement | Notes |
 |-------------|--------|
-| **Exploration artifacts** | Under `logs.root`: `graph.json`, `user_intents.json`, `node_level_information.json`, `node_navigation_plans.json`, `screenshots/{node_id}.jpg` |
-| **Python env** | Same env as CLI inference (FlagEmbedding, dynaconf, dashscope, OpenCV, etc.) |
+| **Exploration artifacts** | Under `logs.root`: `graph.json`, `user_intents.json`, `node_level_information.json`, `edge_level_information.json`, `screenshots/{node_id}.jpg` |
+| **Localizer artifacts** | `ood_classifier.joblib`, `siglip_smolvlm_features.pt` (from `exploration/train_localizer.py`; gallery `dim=1344`) |
+| **Python env** | Same env as CLI inference (FlagEmbedding, dynaconf, dashscope, OpenCV, scikit-learn, transformers, etc.) |
 | **GUI extras** | `pip install -r gui_demo/requirements-gui.txt` (FastAPI, uvicorn, PyYAML) |
 | **Node.js 18+** | For `npm install` / `npm run build` in `gui_demo/web/` |
 | **ADB device** | Emulator or physical device visible in `adb devices` |
-| **Agent server** | MAI-UI or UI-TARS at the `agent.url` in config (default port `8089`) |
+| **Agent server** | MAI-UI or UI-TARS at the `agent.url` in config |
 
 Pick or edit a config under `inference/configs/` (e.g. `outlook_android.yaml`). Set `driver.device_id`, `logs.root` (path to explored app output), and API keys before the demo.
 
@@ -164,29 +165,35 @@ flowchart TB
 
 **Session state** — one in-memory `InferenceSession` holds config, driver, agent, loaded artifacts (`RetrievalContext`), retrieval candidates, selected `node_id`, and execution flags. Changing config clears runtime state.
 
-**Load resources** (`load_artifacts` in `pipeline.py`):
+**Load resources** (`load_artifacts` + localizer load in `inference_gui.py` / CLI):
 
 1. `graph.json` → NetworkX graph + per-node **depth** (shortest hop from nearest root).
 2. `user_intents.json` → `user_intents`, `embedding`, `embedding_text` (BGE-M3 index from post-process Stage 6).
 3. `node_level_information.json` → per-node page descriptions used in VLM reranking.
-4. `node_navigation_plans.json` → per-node **list** of route plans from post-process Stage 5. Each plan has `relevant_waypoint_sequence` (≤ L−1 waypoints) and `transition_hints` (≤ L−1 hops; each hint is `{high_level, low_level}` — one action per graph hop, not one per parallel edge).
-5. BGE-M3 model loaded for query encoding at retrieval time.
-6. `VLM` client for stage-2 reranking.
-7. Agent client connected to `agent.url`.
+4. `edge_level_information.json` → per-edge action descriptions for live next-hop hints.
+5. `ood_classifier.joblib` + `siglip_smolvlm_features.pt` → OOD SVM and SigLIP+SmolVLM gallery for live localization.
+6. BGE-M3 model loaded for query encoding at retrieval time.
+7. `VLM` client for stage-2 reranking.
+8. SigLIP + SmolVLM encoders (`Encoders`) for per-step screenshot features.
+9. Agent client connected to `agent.url`.
 
 **Retrieve** (when `use_memory_for_navigation: true`):
 
 1. **Stage 1** — encode the user query with BGE-M3; cosine-search against precomputed node embeddings in `user_intents.json`; keep top `top_k_in_first_stage_retrieval`.
 2. **Stage 2** — `build_rerank_candidates` enriches hits with `page_description`, `user_intents`, and navigation plans; `VLM.rerank_candidates` reranks; keep top `top_k_retrieval_in_stage_2`.
 3. Return candidate cards with exploration screenshots (`GET /api/screenshots/{node_id}`).
+4. User / `pick_candidate_index` selects **`selected_node_id`** (navigation target).
 
-**Navigation memory** — for the selected node, `get_ui_navigation_memory_for_node` reads plans from `node_navigation_plans.json`, then `format_navigation_plan` builds the text prompt (waypoints + transition hints) passed to the agent. Plans are produced so that **transition hint count matches path hop count** (parallel exploration edges on one hop are collapsed at post-process Stage 5 into a single hint).
+**Execute** (`run_navigation_loop` / `execute_single_task`):
 
-**Execute** (`run_navigation_loop`):
-
-1. `driver.reset_to_start_page()` (back ×5, force-stop, relaunch, optional scroll-up unless `skip_scroll_up_on_reset`, optional `reset_instruction`).
-2. Loop up to `agent.max_steps`: screenshot → `agent.step(navigation_memory, screenshot)` → execute action until `finish` or stop.
-3. Steps stream over `WS /ws/execution` as JSON (thought, coordinates, annotated screenshot). Stop is cooperative (finishes current step, then halts).
+1. `driver.reset_to_start_page()` (back ×5, force-stop, relaunch, optional scroll-up / `reset_instruction`).
+2. Each step:
+   - Screenshot → **OOD** (SigLIP cosine profile vs gallery → SVM on/off-graph).
+   - **Off-graph** → `format_navigation_plan(goal, [])` (goal + global instructions only).
+   - **On-graph** → concat SigLIP+SmolVLM → top-3 gallery matches → shortest-path **next hop** toward `selected_node_id` → up to 3 **transition hints** from `edge_level_information.json` → `format_navigation_plan(goal, hints)`.
+   - If `selected_node_id` is already in the top-3 → finish early.
+   - `agent.step(prompt, screenshot)` → execute action (no extra `driver.wait`).
+3. GUI streams steps over `WS /ws/execution` including **localization** (on/off-graph, top-3, next hops, hints).
 
 This mirrors CLI `inference.py` except candidate selection is **interactive** (tap a card) instead of `pick_candidate_index` or Gradio.
 
@@ -217,8 +224,8 @@ This mirrors CLI `inference.py` except candidate selection is **interactive** (t
 | Blank page at `:8765` | Build failed or `web/dist/` missing — check `run_gui.sh` output. |
 | Agent check fails | Confirm `agent.url`; test `curl -sSf http://HOST:8089/v1/models`. |
 | Device check fails | Run `adb devices`; set `driver.device_id` in config. |
+| Load fails on localizer | Ensure `ood_classifier.joblib` and `siglip_smolvlm_features.pt` (`dim=1344`) exist under `logs.root`; re-run `train_localizer.py`. |
 | Load fails on graph/intents | Verify `logs.root` and that exploration + post-process completed. |
-| Load fails on navigation plans | Ensure `node_navigation_plans.json` exists under `logs.root`. |
 | No candidate cards | Set `use_memory_for_navigation: true`; ensure `embedding` fields exist in `user_intents.json`. |
 | Stop does not interrupt instantly | Stop is cooperative — finishes the current agent step, then halts. |
 
@@ -368,7 +375,7 @@ If coordinates look wrong (e.g. Y lands on a different row than the described el
 | Field | Default | Description |
 |-------|---------|-------------|
 | `query` | — | User goal in natural language (single-task mode). If empty and `batch_mode` is `false`, the script prompts interactively. Ignored when `batch_mode` is `true`. |
-| `use_memory_for_navigation` | — | **`true`**: run embedding + VLM retrieval, then pick a target node. **`false`**: skip retrieval; agent navigates from the screenshot only (empty navigation memory). |
+| `use_memory_for_navigation` | — | **`true`**: run embedding + VLM retrieval, then pick a **target** `selected_node_id` for shortest-path hints. **`false`**: skip retrieval; still runs OOD/localizer when artifacts exist, but next-hop hints need a selected target. |
 | `top_k_in_first_stage_retrieval` | — | Number of nodes returned by embedding search (stage 1). Typical: 15–30. |
 | `top_k_retrieval_in_stage_2` | — | Number of nodes kept after VLM rerank (stage 2). These are the candidates you can choose from via `pick_candidate_index` or Gradio. Typical: 3–5. |
 | `pick_candidate_index` | `-1` | Which stage-2 candidate to navigate with. See [pick_candidate_index](#pick_candidate_index) below. |
@@ -378,7 +385,7 @@ If coordinates look wrong (e.g. Y lands on a different row than the described el
 
 #### `pick_candidate_index`
 
-After stage-2 VLM reranking, candidates are ordered best-first (index `0` = top VLM pick, `1` = second best, and so on). This field chooses which candidate’s `ui_navigation_memory` drives on-device navigation.
+After stage-2 VLM reranking, candidates are ordered best-first (index `0` = top VLM pick, `1` = second best, and so on). This field chooses which candidate becomes **`selected_node_id`** (destination for shortest-path next-hop hints during on-device localization).
 
 | Value | Behavior |
 |-------|----------|
@@ -501,7 +508,7 @@ This lets you compare whether the 1st, 2nd, or 3rd VLM pick actually reaches the
 
 ## Retrieval and navigation hierarchy
 
-Inference splits **finding the right screen** (retrieval) from **getting there on the device** (navigation).
+Inference splits **finding the right target screen** (retrieval) from **getting there on the device** (localized navigation).
 
 ```mermaid
 flowchart LR
@@ -509,7 +516,9 @@ flowchart LR
     subgraph artifacts [logs.root artifacts]
         UI[user_intents.json]
         NL[node_level_information.json]
-        NP[node_navigation_plans.json]
+        EL[edge_level_information.json]
+        FEAT[siglip_smolvlm_features.pt]
+        OOD[ood_classifier.joblib]
         G[graph.json]
     end
     subgraph retrieval [Retrieval — if use_memory_for_navigation]
@@ -518,21 +527,24 @@ flowchart LR
         S2[Stage 2: VLM rerank]
         PICK[pick_candidate_index or Gradio]
     end
-    subgraph nav [Navigation]
+    subgraph nav [Per-step navigation]
+        LOC[OOD + gallery top-3]
+        HOP[shortest-path next hop]
         FM[format_navigation_plan]
-        LOOP[agent.step loop]
+        LOOP[agent.step]
     end
     UI --> S1
     NL --> BR
-    NP --> BR
-    G --> LOOP
+    G --> HOP
+    EL --> HOP
+    FEAT --> LOC
+    OOD --> LOC
     Q --> S1
     S1 --> BR --> S2 --> PICK
-    PICK --> FM
-    NP --> FM
+    PICK -->|selected_node_id| HOP
+    LOC --> HOP --> FM --> LOOP
     Q --> FM
-    FM --> LOOP
-    LOOP -->|screenshot + memory| AGENT[MAI-UI / UI-TARS]
+    LOOP -->|screenshot + hints| AGENT[MAI-UI / UI-TARS]
     AGENT -->|action| DRV[Android / Harmony driver]
     DRV -->|execute| DEV[Device]
 ```
@@ -557,7 +569,7 @@ Joins stage-1 hits with:
 |-------------|-------------|
 | `node_level_information.json` | `high_level`, `medium_level`, `low_level` → `page_description` |
 | `user_intents.json` | `user_intents` |
-| `node_navigation_plans.json` | plan list per node → `ui_navigation_memory` (waypoints + one hint per hop for reranker / agent prompt) |
+| `node_navigation_plans.json` | plan list per node → `ui_navigation_memory` (waypoints + hints for **VLM reranker** context; live agent prompts use OOD/localizer hints instead) |
 
 Returns `{ "task_prompt": ..., "candidates": [...] }` for the VLM reranker.
 
@@ -587,48 +599,68 @@ Each graph node gets a **depth**: shortest path length from the nearest root (`i
 
 Requires `pip install gradio`.
 
-### Navigation memory formatting
+### Navigation prompt formatting + live localization
 
-**Function:** `get_ui_navigation_memory_for_node` → `format_navigation_plan`
+**Functions:** `format_navigation_plan`, OOD/`ood_features`, gallery cosine match (CLI `execute_single_task`; GUI `localize_screenshot`)
 
-- Reads **`node_navigation_plans.json`**. Each node maps to a **list** of plan objects.
-- `normalize_ui_navigation_memory()` accepts either that list format or legacy `{ "ui_navigation_memory": [...] }` wrappers.
+Live prompts are **not** a static dump of `node_navigation_plans.json`. Each step rebuilds the agent instruction from localization:
 
-**Plan schema** (from post-process Stage 5):
+| Case | Agent prompt |
+|------|----------------|
+| Off-graph (`ood_label=0`) | Final goal (+ `in the current application`) + `[Global usage instruction]` |
+| On-graph | Same + up to **3** `[Hint i]` entries (`High` / `Low`) for next hops from top-3 matches |
+| Top-3 already contains `selected_node_id` | Finish early (no agent call) |
 
-| Field | Type | Meaning |
-|-------|------|---------|
-| `relevant_waypoint_sequence` | `string[]` | Semantic page/state names along the route (at most **L − 1**, where L = pages on the source path) |
-| `transition_hints` | `object[]` | One hint per hop; each item has `high_level` (intent) and `low_level` (visual grounding) |
+**`format_navigation_plan(final_goal, transition_hints)`**
 
-A path with L graph nodes has **L − 1** hops. Inference expects **one transition hint per hop**, not one per parallel edge recorded during exploration. When a hop had multiple `alternative_actions` in post-process, Stage 5 should have collapsed them into a single hint (best action, merged `"X / Y"`, or noise removed).
+- Appends ` in the current application` to the goal when missing.
+- Renders optional next-step hints (high-level intent + low-level visual grounding).
+- Always ends with `[Global usage instruction]` (advance toward goal, do not mix disagreeing plans, finish when done, don’t leave the app).
 
-`format_navigation_plan` builds the agent prompt:
+**Per-step localization pipeline**
 
-- Up to **3** alternative plans may appear (one per top-ranked root→node path).
-- The agent compares waypoints to the current screenshot, selects the best-matching plan, and follows hints in order.
-- Each hint is rendered as `- Low: …` / `High: …` when both fields are present.
-- **Finish** when the final goal is already visible on screen.
+```text
+screenshot
+  → letterbox to target_hw
+  → SigLIP z  → 16-d cosine profile vs gallery SigLIP  → OOD SVM
+  if on-graph:
+      → SmolVLM vision  → concat with z  → cosine top-3 vs gallery
+      → for each match: shortest_path → next hop → edge_level_information[src|dst]
+      → transition_hints (≤3)
+  → format_navigation_plan(goal, hints) → agent.step
+```
 
-If `use_memory_for_navigation` is `false`, the agent gets a short fallback instruction (screenshot + goal only).
+| Artifact | Role |
+|----------|------|
+| `ood_classifier.joblib` | SVM on cosine-profile features (`prepare_data_for_ood` / `train_ood_classifier`) |
+| `siglip_smolvlm_features.pt` | Gallery `gallery_z` (`dim=1344`), `node_ids`, `target_hw` |
+| `edge_level_information.json` | `low_level_action_description` / `high_level_action_description` per edge (list of alternatives; first entry used) |
+| `graph.json` | Shortest path from localized node → `selected_node_id` |
+
+Train these with [`exploration/train_localizer.py`](../exploration/README.md#screenshot-localizer-train_localizerpy).
 
 ### On-device navigation loop
 
-After `driver.reset_to_start_page()` (back ×5, close app, relaunch, optional scroll-up unless `skip_scroll_up_on_reset`, optional `reset_instruction`):
+After `driver.reset_to_start_page()`:
 
 ```text
 for up to agent.max_steps:
     screenshot = driver.take_screenshot()
-    action = agent.step(navigation_memory, screenshot)
+    ood / localize → transition_hints (maybe empty)
+    prompt = format_navigation_plan(goal, transition_hints)
+    if selected node in top-3 → finish
+    action = agent.step(prompt, screenshot)
     if action is finish → stop
-    else driver.execute_action(action)
+    else driver.execute_action(action)   # no fixed sleep/wait
 ```
 
-The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends screenshots and the formatted memory string.
+Console prints per-step timing: `shot=…s loc=…s agent=…s act=…s total=…s`.
+
+The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends screenshots and the formatted prompt.
 
 ### GUI demo parity
 
-[`gui_demo/pipeline.py`](gui_demo/pipeline.py) exposes the same flow as [`inference.py`](inference.py): `load_artifacts` (with `user_intents.json` fallback to legacy `node_intents.json`), `run_retrieval`, `get_navigation_memory_for_node`, and `run_navigation_loop`. The React wizard calls these via FastAPI in [`gui_demo/inference_gui.py`](gui_demo/inference_gui.py).
+[`gui_demo/pipeline.py`](gui_demo/pipeline.py) mirrors CLI localization (`localize_screenshot`, `format_navigation_plan`, `run_navigation_loop`). The React wizard shows **localization** (on/off-graph, top-3, next hops, hints) beside each live step screenshot via [`gui_demo/inference_gui.py`](gui_demo/inference_gui.py).
 
 
 ---
@@ -637,13 +669,16 @@ The agent (`mai_ui` or `ui_tars`) is a separate server; inference only sends scr
 
 | File / folder | Source | Used for |
 |---------------|--------|----------|
-| `graph.json` | Exploration export | Graph structure, depths, legacy `page_purpose` |
+| `graph.json` | Exploration export | Graph structure, depths, shortest-path next hops |
 | `user_intents.json` | Post-process Stages 4 + 6 | `user_intents`, `embedding`, `embedding_text` |
 | `node_level_information.json` | Post-process Stage 1 | Page descriptions for reranking |
-| `node_navigation_plans.json` | Post-process Stage 5 | List of plans per node: `relevant_waypoint_sequence` + `transition_hints` (one `{high_level, low_level}` hint per hop) |
+| `edge_level_information.json` | Post-process Stage 2 | Live next-hop `high_level` / `low_level` hints |
+| `node_navigation_plans.json` | Post-process Stage 5 | Optional: still used when building VLM rerank candidates |
+| `ood_classifier.joblib` | `train_localizer.py` | On/off-graph OOD SVM |
+| `siglip_smolvlm_features.pt` | `train_localizer.py` | Gallery for localization (`dim=1344`) |
 | `screenshots/{node_id}.jpg` | Exploration | Gradio / GUI candidate cards, debugging |
 
-If any of these are missing, retrieval or the picker may fail or show empty galleries.
+If retrieval artifacts are missing, candidate pick may fail. If localizer artifacts are missing or `gallery_z` has the wrong dim, on-device navigation fails at load / first step.
 
 ---
 
@@ -654,8 +689,10 @@ Run from `inference/` with the same Python environment as exploration. Key packa
 - `dynaconf` — config loading
 - `FlagEmbedding` — BGE-M3 (stage 1)
 - `gradio` — candidate picker
-- `networkx` — graph depths
+- `networkx` — graph depths / shortest paths
 - `dashscope` — VLM rerank (via `VLM.py`)
+- `scikit-learn` / `joblib` — OOD classifier
+- `transformers` / `torch` — SigLIP + SmolVLM encoders
 
 Device control and agents are provided under `Driver/` and `Agents/` in this directory.
 
@@ -673,6 +710,8 @@ Device control and agents are provided under `Driver/` and `Agents/` in this dir
 | Agent reasoning OK but taps miss UI | MAI-UI server likely on **vLLM ≥ 0.2** (e.g. 0.21.x) — use **vllm==0.11.0**; run the [grounding smoke test](#mai-ui-server-vllm) |
 | Retrieval picks wrong page | Increase `top_k_in_first_stage_retrieval`, try a different `pick_candidate_index`, or use Gradio (`-1`) |
 | Wrong page but 2nd candidate looks right | Re-run with `pick_candidate_index: 1` (or higher) |
+| `feature dim mismatch` / localizer load error | Re-run `train_localizer.py` so `siglip_smolvlm_features.pt` has `dim=1344` |
+| Agent gets no hints / always off-graph | Check OOD model + gallery under `logs.root`; confirm screenshots match `target_hw` |
 | Batch mode: `input_dir is required` | Set `input_dir` to the dataset root |
 | Batch mode: empty output | Set `output_dir`; check task folders contain `prompts.json` |
 | Skip retrieval entirely | Set `use_memory_for_navigation: false` |

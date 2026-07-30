@@ -2,12 +2,13 @@
 
 Automated mobile app exploration: vision-language **agents** act on a device, a **VLM** backend (`VLM` or `VLM_Yibu`) extracts screens and elements, and a **navigation graph** grows over many walks. Run everything from `refactored/exploration/` so imports resolve.
 
-**Inference preparation is a two-phase pipeline:**
+**Inference preparation is a three-phase pipeline:**
 
 1. **Exploration** (`explore.py`) — grow `graph.json`, per-node screenshots, and `app_graph.pkl` under `logs.root`.
 2. **Post-processing** (`post_process.py`) — read that graph and produce structured artifacts for inference: **node-level page descriptions**, **edge transition hints**, **ranked path intents**, **user intents**, **navigation plans**, **BGE-M3 retrieval embeddings**, and **MAI-UI fine-tuning samples** (`user_intents.json`, `node_navigation_plans.json`, `agent_data.json`, and intermediate JSON files under the same `logs.root`).
+3. **Localizer training** (`train_localizer.py`) — build an **on/off-graph OOD classifier** and a **SigLIP+SmolVLM screenshot gallery** so inference can localize the live screen and suggest next-hop actions to the agent.
 
-You need a completed exploration run (same `logs.root` as in your YAML) before post-processing. Post-processing does not drive the device.
+You need a completed exploration run (same `logs.root` as in your YAML) before post-processing. Post-processing and localizer training do not drive the device.
 
 ---
 
@@ -272,6 +273,36 @@ python -u post_process.py --config configs/clock_android.yaml
 **Output:** `{logs.root}/user_intents.json` (with embeddings), `{logs.root}/node_navigation_plans.json`, `{logs.root}/agent_data.json`, plus intermediate files (`node_level_information.json`, `edge_level_information.json`, `path_intents.json`) and `{logs.root}/post_process.log` when using the shell wrapper.
 
 Detail: [Post-processing](#post-processing-post_processpy).
+
+### 5) Train the screenshot localizer (`train_localizer.py`)
+
+After post-processing, train the **OOD (on/off-graph) classifier** and save **per-node vision features** used at inference for live-screen localization.
+
+**Prerequisites:** `{logs.root}/screenshots/*.jpg`, sibling apps under the explored-apps root (for OOD negatives), and preferably `graph.json` on those siblings.
+
+From `exploration/`:
+
+```bash
+python -u train_localizer.py \
+  --app_dir ./explored_apps/amazon \
+  --root_dir ./explored_apps
+```
+
+**What it does:**
+
+| Step | Function | Output |
+|------|----------|--------|
+| Build OOD training rows | `prepare_data_for_ood` | In-app SigLIP gallery; 16-d **cosine-profile** features vs that gallery for in-app (LOO positives) and sibling-app screenshots (negatives) |
+| Train classifier | `train_ood_classifier` | `{app_dir}/ood_classifier.joblib` — sklearn `StandardScaler` + RBF SVM (`class_weight=balanced`), plus decision `threshold` |
+| Save gallery features | `save_screenshot_features` | `{app_dir}/siglip_smolvlm_features.pt` — per-node `l2(concat(l2(SigLIP), l2(SmolVLM-vision)))` vectors (`dim=1344` = 768+576), `node_ids`, `target_hw` |
+
+**How inference uses these artifacts** (see [inference README](../inference/README.md)):
+
+1. **OOD** — SigLIP embedding of the live screenshot → cosine profile vs gallery SigLIP half → SVM predicts **on-graph** (`1`) or **off-graph** (`0`).
+2. **On-graph localization** — concat SigLIP+SmolVLM features → cosine top-3 nodes in the gallery → shortest-path next hop toward the retrieved target → look up `edge_level_information.json` for up to **3 transition hints** (`high_level` / `low_level`).
+3. **Agent prompt** — `format_navigation_plan(goal, transition_hints)` (goal-only when off-graph or no hints).
+
+Detail: [Screenshot localizer](#screenshot-localizer-train_localizerpy).
 
 ---
 
@@ -683,8 +714,48 @@ Stage 6 embeddings run locally via **BGE-M3** (`FlagEmbedding`) and do not use t
 2. **Explore** — `CONFIG=configs/your_app.yaml ./run_explore.sh` until the graph is large enough.
 3. **Confirm artifacts** — under `logs.root`: `graph.json`, `screenshots/*.jpg`, `app_graph.pkl`.
 4. **Post-process** — `CONFIG=configs/your_app.yaml ./run_post_process.sh` → full artifact set above (including `agent_data.json` for MAI-UI fine-tuning).
-5. **Downstream inference** — cosine-search `embedding` in `user_intents.json`, VLM-rerank with page descriptions, replay routes from `node_navigation_plans.json`.
-6. **Optional fine-tuning** — `fine_tune/prepare_data.py` reads `agent_data.json` + screenshots to build MAI-UI SFT chat samples.
+5. **Train localizer** — `python train_localizer.py --app_dir ./explored_apps/<app> --root_dir ./explored_apps` → `ood_classifier.joblib` + `siglip_smolvlm_features.pt`.
+6. **Downstream inference** — retrieve a target node (BGE-M3 + VLM), then on-device: **OOD + gallery localization** suggest next-hop hints to the agent ([inference README](../inference/README.md)).
+7. **Optional fine-tuning** — `fine_tune/prepare_data.py` reads `agent_data.json` + screenshots to build MAI-UI SFT chat samples.
+
+---
+
+## Screenshot localizer (`train_localizer.py`)
+
+Trains artifacts that let inference decide whether the live screen is **on the explored graph** and, if so, **which nodes it matches** so the agent can be given next-hop transition hints.
+
+### Models
+
+| Encoder | Checkpoint | Role |
+|---------|------------|------|
+| SigLIP | `google/siglip-base-patch16-224` | OOD cosine profiles + first 768 dims of gallery / query |
+| SmolVLM vision | `HuggingFaceTB/SmolVLM-256M-Instruct` | Mean-pooled image tokens; concat with SigLIP for node matching (`dim=1344`) |
+
+### OOD training (`prepare_data_for_ood` → `train_ood_classifier`)
+
+- **In-app gallery** — encode letterboxed screenshots under `{app_dir}/screenshots/` with SigLIP; skip near-blank frames.
+- **Positives** — leave-one-out cosine profiles of each gallery vector against the rest (well-connected nodes kept).
+- **Negatives** — sample screenshots from **sibling apps** under `--root_dir` (folders with `graph.json` and ≥5 screenshots); same 16-d profile against the **target app** gallery.
+- **Classifier** — `StandardScaler` + RBF SVM (`C=20`, `class_weight=balanced`, `probability=True`); threshold chosen to maximize balanced accuracy.
+- **Saved** — `{app_dir}/ood_classifier.joblib` (`model`, `threshold`, metrics, `feature_names`, `app`).
+
+### Gallery features (`save_screenshot_features`)
+
+For each non-blank screenshot:
+
+```text
+gallery_z[i] = l2( concat( l2(SigLIP(img)), l2(SmolVLM_vision(img)) ) )
+```
+
+Saved to `{app_dir}/siglip_smolvlm_features.pt` with `node_ids`, `target_hw`, and model ids. Inference expects **`dim=1344`**; regenerate if an older buggy export used flattened patch tokens.
+
+### CLI
+
+```bash
+python train_localizer.py --app_dir ./explored_apps/<app> --root_dir ./explored_apps
+```
+
+Unset broken HTTP proxies / use local HF cache as needed (see comments at top of `train_localizer.py`).
 
 ---
 
@@ -1499,6 +1570,8 @@ Outputs under `logs.root` (e.g. `explored_apps/clock/`):
 | `user_intents.json` | Post-processing Stages 4+6: `user_intents`, `embedding_text`, `embedding` |
 | `node_navigation_plans.json` | Post-processing Stage 5: per-node list of plans (≤ L−1 waypoints and hints per path) |
 | `agent_data.json` | Post-processing Stage 7: MAI-UI `user_instruction` / `agent_output` pairs for fine-tuning |
+| `ood_classifier.joblib` | `train_localizer.py`: on/off-graph SVM + threshold |
+| `siglip_smolvlm_features.pt` | `train_localizer.py`: per-node SigLIP+SmolVLM gallery (`dim=1344`) |
 | `post_process.log` | Console stdout/stderr when using `run_post_process.sh` |
 
 ### Exploration progress plot
@@ -2174,6 +2247,7 @@ If the agent keeps conversation state:
 | `run_explore.sh` | Run `explore.py` with `CONFIG=...`; tee log to `{logs.root}/explore.log` — see [How to run](#how-to-run) |
 | `post_process.py` | Stages 1–5: node/edge/path/user intents + navigation plans; Stage 6: BGE-M3 → `user_intents.json`; Stage 7: MAI-UI thoughts → `agent_data.json` |
 | `run_post_process.sh` | Run `post_process.py` with `CONFIG=...`; tee log to `{logs.root}/post_process.log` — see [Post-processing](#post-processing-post_processpy) |
+| `train_localizer.py` | OOD SVM + SigLIP/SmolVLM gallery → `ood_classifier.joblib`, `siglip_smolvlm_features.pt` — see [Screenshot localizer](#screenshot-localizer-train_localizerpy) |
 | `Graph/AppGraph.py` | NetworkX graph, `add_node` / `add_edge`, JSON + pickle export; `logs_num_walks_nodes` for progress plot |
 | `Graph/Node.py` | Screen node creation, VLM elements, `refresh_elements`, `backtracking_action` |
 | `Graph/BackTrack.py` | `get_back_to_previous_node`, `backtrack_using_agent`, `get_shortest_path_from_root_node`, `get_action_history_and_node_history_from_root_node` |
