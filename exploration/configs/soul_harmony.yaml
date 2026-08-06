@@ -16,8 +16,8 @@ default:
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
-    yibu_api_key: 'sk-RBKsBNgCvZPw61tyyJjZZS78ewggEyoTDIRCtZ5hxKVqQpHa'
-    use_yibu_api: true
+    yibu_api_key: 'sk-3g7iC1zP9DdWrYy1BO7XE01HR8TAWCKiqcLvSDDbNU9ly0Fx'
+    use_yibu_api: false
     model_name_for_page_summary: 'qwen3.5-flash'
     screenshot_longest_side_for_element_extraction_model: 1536
     model_name_for_elements_extraction: 'qwen3.6-plus'
@@ -112,4 +112,4 @@ default:
     vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
     vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
-    use_yibu_api: true
+    use_yibu_api: false

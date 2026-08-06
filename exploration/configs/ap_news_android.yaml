@@ -3,16 +3,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Airbnb"
-    description: "The Airbnb app allows users to search for, book, and manage accommodations and experiences worldwide."
+    name: "AP News"
+    description: "AP News is the Associated Press news app for breaking world and local news, photography, and sports coverage."
 
   driver:
-    device_id: "R5CTC10XL7X"
+    device_id: "R3CX20L5N6F"
     os_name: "android"
-    appPackage: "com.airbnb.android"
-    appActivity: ".feat.splashscreen.SplashScreenActivity"
+    appPackage: "mnn.Android"
+    appActivity: "com.apnews.app.activity.MainActivity"
     skip_exploration_for_no_app_package: true
-    reset_instruction: "Go to the Explore tab. If already there, return finished."
+    skip_scroll_up_on_reset: true
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -31,7 +31,7 @@ default:
 
   agent:
     verbose_print: false
-    url: "http://localhost:8000/v1"
+    url: "http://10.193.241.177:8091/v1"
     model_name: "mai_ui"
     settings:
       history_n: 3
@@ -75,7 +75,7 @@ default:
     max_refresh_elements_on_each_node_visit: 2
     refresh_elements_after_at_least_nodes_for_k_times: 5
 
-    where_am_i_global:
+    global_localization:
       find_node_visual_emphasize:
         clip_embedding_similarity_threshold: 0.99
         xml_distance_threshold: 0.5
@@ -95,7 +95,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/airbnb"
+    root: "explored_apps/ap_news"
     resume_from_checkpoint: true
 
   post_process:
@@ -112,4 +112,4 @@ default:
     vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
     vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
-    use_yibu_api: true
+    use_yibu_api: false
