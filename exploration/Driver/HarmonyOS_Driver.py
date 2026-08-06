@@ -19,11 +19,24 @@ _IME_WINDOW_RE = re.compile(
 _IME_BOUNDS_RE = re.compile(
     r"\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]"
 )
+_BUNDLE_NAME_RE = re.compile(r"bundle name\s*\[([^\]]+)\]")
+# System / shell surfaces that can also report FOREGROUND alongside the user app.
+_SYSTEM_FOREGROUND_BUNDLE_RE = re.compile(
+    r"^(?:com\.ohos\.sceneboard|com\.ohos\.systemui|com\.ohos\.launcher|"
+    r"com\.ohos\.medialibrary(?:\..*)?)$"
+)
 
 
 class HarmonyDriver(BaseDriver):
     def __init__(self, settings: dict, agent=None) -> None:
         super().__init__(settings, agent)
+        self._screen_size_cache: Optional[Tuple[int, int]] = None
+
+    def wait(self, seconds: float | None = None) -> None:
+        # Shorter default settle than Android (1.0s); override with settings action_wait_s.
+        if seconds is None:
+            seconds = float(self.settings.get("action_wait_s", 0.5))
+        super().wait(seconds)
 
     def _hdc_prefix(self):
         if not self.device_id:
@@ -47,7 +60,7 @@ class HarmonyDriver(BaseDriver):
 
     def is_keyboard_open(self) -> bool:
         """
-        Fast keyboard check via WindowManagerService (~0.1s).
+        Fast keyboard check via WindowManagerService (~0.1–0.3s).
 
         Avoids uitest dumpLayout (~1s+), which previously ran on every screenshot.
         A keyboard window is treated as open when ZOrd >= 0 and bounds are non-trivial.
@@ -102,29 +115,29 @@ class HarmonyDriver(BaseDriver):
                 os.remove(local)
             except OSError:
                 pass
-            self._hdc_run(["shell", "rm", "-f", remote], timeout=5)
+            # Unique remote names already avoid collisions; skip sync rm (extra hdc RTT).
 
     def get_foreground_package(self) -> str | None:
+        """
+        Foreground bundle via `aa dump -l` (~0.2s), not uitest dumpLayout (~2–3s+).
+        """
         try:
-            out = self._hdc_out(
-                [
-                    "shell",
-                    (
-                        "uitest dumpLayout -p /data/local/tmp/window_dump.json >/dev/null && "
-                        "cat /data/local/tmp/window_dump.json | "
-                        "grep -oE '\"bundleName\":\"[^\"]+\"|\"bundleName\": \"[^\"]+\"' | "
-                        "sed -E 's/.*\"bundleName\"[ ]*:[ ]*\"([^\"]+)\".*/\\1/' | "
-                        "grep -vE 'com\\.ohos\\.sceneboard|com\\.ohos\\.systemui|com\\.ohos\\.launcher' | "
-                        "head -n 1"
-                    ),
-                ],
-                timeout=10,
-            ).decode("utf-8", "ignore").strip()
-
-            return out or None
-
+            out = self._hdc_out(["shell", "aa", "dump", "-l"], timeout=10).decode("utf-8", "ignore")
         except Exception:
             return None
+
+        current_bundle: Optional[str] = None
+        for line in out.splitlines():
+            m = _BUNDLE_NAME_RE.search(line)
+            if m:
+                current_bundle = m.group(1).strip()
+                continue
+            if "app state #FOREGROUND" not in line or not current_bundle:
+                continue
+            if _SYSTEM_FOREGROUND_BUNDLE_RE.match(current_bundle):
+                continue
+            return current_bundle
+        return None
 
     def close_application(self) -> None:
         bundle = self.settings["appPackage"]  
@@ -207,12 +220,7 @@ class HarmonyDriver(BaseDriver):
         return ET.tostring(hierarchy, encoding="unicode")
 
     def get_current_app_id(self) -> Optional[str]:
-        try:
-            out = self._hdc_out(["shell", "aa", "dump", "-a"], timeout=10).decode("utf-8", "ignore")
-            m = re.search(r"bundleName:\s*([\w.]+)", out)
-            return m.group(1) if m else None
-        except Exception:
-            return None
+        return self.get_foreground_package()
 
     def click(self, x: int, y: int) -> None:
         self._hdc_run(["shell", "uitest", "uiInput", "click", str(int(x)), str(int(y))], timeout=10)
@@ -241,14 +249,17 @@ class HarmonyDriver(BaseDriver):
         self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "Home"], timeout=10)
 
     def get_screen_size(self) -> Tuple[int, int]:
+        if self._screen_size_cache is not None:
+            return self._screen_size_cache
         out = self._hdc_out(["shell", "hidumper", "-s", "DisplayManagerService", "-a", "dumpDisplayInfo"], timeout=10).decode(
             "utf-8", "ignore"
         )
         m = re.search(r"width\s*=\s*(\d+).*height\s*=\s*(\d+)", out, re.DOTALL)
         if not m:
-            # fallback common phone
-            return 1080, 2400
-        return int(m.group(1)), int(m.group(2))
+            self._screen_size_cache = (1080, 2400)
+        else:
+            self._screen_size_cache = (int(m.group(1)), int(m.group(2)))
+        return self._screen_size_cache
 
     def run_application(self) -> None:
         pkg = self.settings["appPackage"]
@@ -367,4 +378,3 @@ class HarmonyDriver(BaseDriver):
                 "entry": None,
                 "error": str(e),
             }
-

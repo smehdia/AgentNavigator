@@ -93,8 +93,11 @@ class BaseDriver(ABC):
     def is_keyboard_open(self) -> bool:
         raise NotImplementedError
 
-    def wait(self, seconds: float = 1.0) -> None:
-        time.sleep(seconds)
+    def wait(self, seconds: float | None = None) -> None:
+        """Settle after an action. Default 1.0s; override via settings `action_wait_s`."""
+        if seconds is None:
+            seconds = float(self.settings.get("action_wait_s", 1.0))
+        time.sleep(max(0.0, float(seconds)))
 
     @staticmethod
     def _best_xy(parsed: ParsedAction) -> Optional[Tuple[int, int]]:
