@@ -13,6 +13,8 @@ default:
     appActivity: ".activity.SplashHomeActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
+    reset_instruction: "Wait until the loading banner disappares then return finished."
+
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -112,4 +114,4 @@ default:
     vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
     vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
-    use_yibu_api: false
+    use_yibu_api: true

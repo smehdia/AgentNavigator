@@ -3,16 +3,17 @@ default:
   debug_mode: False
 
   app:
-    name: "Babbel"
-    description: "Babbel is a language-learning app for taking interactive lessons, practicing speaking, and building vocabulary in multiple languages."
+    name: "Chatbot App"
+    description: "Chatbot App is an AI chat assistant for conversational Q&A, creative writing, and everyday assistance."
 
   driver:
     device_id: "R3CX20L5N6F"
     os_name: "android"
-    appPackage: "com.babbel.mobile.android.en"
-    appActivity: "com.babbel.mobile.android.core.presentation.mainactivity.screens.MainActivity"
+    appPackage: "ai.app.ai"
+    appActivity: ".MainActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
+    reset_instruction: "close subscription page via top-left X, then if there is a pop up click on top of the page to ignore it, then finished"
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
@@ -95,7 +96,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/babbel"
+    root: "explored_apps/chatbot_app"
     resume_from_checkpoint: true
 
   post_process:

@@ -11,6 +11,7 @@ default:
     os_name: "harmony"
     appPackage: "com.kingsoft.iciba"
     appActivity: "EntryAbility"
+    appModule: "ciba"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
 
@@ -112,4 +113,4 @@ default:
     vlm_model_name_for_navigation_plan: 'qwen3.6-plus'
     vlm_model_name_for_agent_thought: 'qwen3.6-flash'
 
-    use_yibu_api: false
+    use_yibu_api: true

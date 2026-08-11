@@ -3,14 +3,14 @@ default:
   debug_mode: False
 
   app:
-    name: "Babbel"
-    description: "Babbel is a language-learning app for taking interactive lessons, practicing speaking, and building vocabulary in multiple languages."
+    name: "ChatOn AI"
+    description: "ChatOn AI is an AI chatbot app for conversations, writing help, and answering questions."
 
   driver:
     device_id: "R3CX20L5N6F"
     os_name: "android"
-    appPackage: "com.babbel.mobile.android.en"
-    appActivity: "com.babbel.mobile.android.core.presentation.mainactivity.screens.MainActivity"
+    appPackage: "ai.chat.gpt.bot"
+    appActivity: "com.aiby.chat.MainActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
 
@@ -95,7 +95,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/babbel"
+    root: "explored_apps/chaton_ai"
     resume_from_checkpoint: true
 
   post_process:

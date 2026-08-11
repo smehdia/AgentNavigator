@@ -3,17 +3,16 @@ default:
   debug_mode: False
 
   app:
-    name: "Babbel"
-    description: "Babbel is a language-learning app for taking interactive lessons, practicing speaking, and building vocabulary in multiple languages."
+    name: "Breaking News"
+    description: "Opera News (Breaking News) is a news app for local and world headlines, personalized feeds, and breaking news alerts."
 
   driver:
     device_id: "R3CX20L5N6F"
     os_name: "android"
-    appPackage: "com.babbel.mobile.android.en"
-    appActivity: "com.babbel.mobile.android.core.presentation.mainactivity.screens.MainActivity"
+    appPackage: "com.news.app.global"
+    appActivity: "com.opera.android.startup.NewsStartActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
-
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
     yibu_api_key: 'sk-3g7iC1zP9DdWrYy1BO7XE01HR8TAWCKiqcLvSDDbNU9ly0Fx'
@@ -95,7 +94,7 @@ default:
         compare_navigational_purpose_model: 'qwen3.5-flash'
 
   logs:
-    root: "explored_apps/babbel"
+    root: "explored_apps/breaking_news"
     resume_from_checkpoint: true
 
   post_process:
