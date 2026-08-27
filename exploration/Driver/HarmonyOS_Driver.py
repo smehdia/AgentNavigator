@@ -20,11 +20,31 @@ _IME_BOUNDS_RE = re.compile(
     r"\[\s*\d+\s+\d+\s+(\d+)\s+(\d+)\s*\]"
 )
 _BUNDLE_NAME_RE = re.compile(r"bundle name\s*\[([^\]]+)\]")
+_FOCUS_WINDOW_RE = re.compile(r"Focus window:\s*(\d+)")
+_WMS_SKIP_WIN_RE = re.compile(
+    r"^(?:SCB|BackgroundBlur|TransparentView|ARK_APP_SUBWINDOW)",
+    re.I,
+)
 # System / shell surfaces that can also report FOREGROUND alongside the user app.
 _SYSTEM_FOREGROUND_BUNDLE_RE = re.compile(
     r"^(?:com\.ohos\.sceneboard|com\.ohos\.systemui|com\.ohos\.launcher|"
     r"com\.ohos\.medialibrary(?:\..*)?)$"
 )
+# dumpDisplayInfo has no WxH on Harmony NEXT; prefer RenderService / Display -a -a.
+_RENDER_RES_RE = re.compile(
+    r"(?i)(?:render resolution|physical resolution|activeMode)\s*=\s*(\d+)\s*x\s*(\d+)"
+)
+_DISPLAY_WIDTH_RE = re.compile(r"(?im)^Width:\s*(\d+)\s*$")
+_DISPLAY_HEIGHT_RE = re.compile(r"(?im)^Height:\s*(\d+)\s*$")
+_LEGACY_WH_RE = re.compile(r"width\s*=\s*(\d+).*height\s*=\s*(\d+)", re.DOTALL | re.IGNORECASE)
+_WMS_PANEL_RE = re.compile(
+    r"SCBScenePanel\S*.*?\[\s*0\s+0\s+(\d+)\s+(\d+)\s*\]"
+)
+# In-app screenshot-share sheets (同花顺/微博/小红书 etc.) after snapshot_display.
+_SCREENSHOT_SHARE_RE = re.compile(
+    r"(保存图片|去分享吧|分享到|长按识别二维码|分享图片|微信好友)"
+)
+_BOUNDS_RE = re.compile(r'"bounds"\s*:\s*"\[(\d+),(\d+)\]\[(\d+),(\d+)\]"')
 
 
 class HarmonyDriver(BaseDriver):
@@ -90,9 +110,76 @@ class HarmonyDriver(BaseDriver):
             if not m:
                 continue
             width, height = int(m.group(1)), int(m.group(2))
-            if zord >= 0 and width > 50 and height > 50:
-                return True
+            if zord < 0 or width <= 50 or height <= 80:
+                continue
+            # Hidden IME surfaces report fullscreen bounds even when closed.
+            try:
+                _w, sh = self.get_screen_size()
+            except Exception:
+                sh = 2688
+            if height >= int(sh * 0.85):
+                continue
+            return True
         return False
+
+    def _dump_layout_raw(self) -> str:
+        remote = "/data/local/tmp/window_dump.xml"
+        try:
+            return self._hdc_out(
+                ["shell", f"uitest dumpLayout -p {remote} >/dev/null && cat {remote}"],
+                timeout=30,
+            ).decode("utf-8", "ignore")
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _share_cancel_xy(raw: str) -> Optional[Tuple[int, int]]:
+        """Center of the fat bottom 取消 button on a screenshot-share sheet."""
+        if not raw:
+            return None
+        for token in ('"text":"取消"', '"originalText":"取消"'):
+            start = 0
+            while True:
+                idx = raw.find(token, start)
+                if idx < 0:
+                    break
+                window = raw[max(0, idx - 700) : idx + 80]
+                m = _BOUNDS_RE.search(window)
+                if m:
+                    x1, y1, x2, y2 = (int(m.group(i)) for i in range(1, 5))
+                    if (x2 - x1) >= 400 and y1 >= 1800:
+                        return (x1 + x2) // 2, (y1 + y2) // 2
+                start = idx + len(token)
+        return None
+
+    def _dismiss_screenshot_share_if_present(self) -> None:
+        """
+        snapshot_display is treated as a user screenshot by many CN apps (Tonghuashun,
+        Weibo, XHS). They then open a share poster + 微信/保存图片 sheet. The *next*
+        capture would graph that overlay as the current page. Dismiss it in-app only.
+        """
+        if not self.settings.get("dismiss_screenshot_share", True):
+            return
+        # Overlay is not in the a11y tree immediately after snapshot_display.
+        self.wait(0.8)
+        pkg = self.settings.get("appPackage")
+        dbg = getattr(self.agent, "debugger", None) if self.agent else None
+        for _ in range(3):
+            if pkg and self.get_foreground_package() != pkg:
+                break
+            raw = self._dump_layout_raw()
+            if not raw or not _SCREENSHOT_SHARE_RE.search(raw):
+                break
+            xy = self._share_cancel_xy(raw)
+            msg = f"Harmony screenshot-share overlay detected; dismissing via {'取消 click' if xy else 'Back'}"
+            logging.info(msg)
+            if dbg:
+                dbg.log(msg, color="yellow")
+            if xy:
+                self.click(*xy)
+            else:
+                self.back()
+            self.wait(0.45)
 
     def take_screenshot(self):
         # Match Android: optional IME dismiss before capture. Harmony previously always
@@ -109,6 +196,7 @@ class HarmonyDriver(BaseDriver):
             img = cv2.imread(local, cv2.IMREAD_COLOR)
             if img is None or img.size == 0:
                 raise RuntimeError("Failed to read screenshot from Harmony device.")
+            self._dismiss_screenshot_share_if_present()
             return img
         finally:
             try:
@@ -119,8 +207,16 @@ class HarmonyDriver(BaseDriver):
 
     def get_foreground_package(self) -> str | None:
         """
-        Foreground bundle via `aa dump -l` (~0.2s), not uitest dumpLayout (~2–3s+).
+        Foreground bundle via `aa dump -l` (~0.2s). Some Harmony apps (e.g. Qunar)
+        stay focused in WMS but never report `app state #FOREGROUND`, so fall back
+        to the focused window pid → process name.
         """
+        pkg = self._foreground_from_aa_dump()
+        if pkg:
+            return pkg
+        return self._foreground_from_wms()
+
+    def _foreground_from_aa_dump(self) -> Optional[str]:
         try:
             out = self._hdc_out(["shell", "aa", "dump", "-l"], timeout=10).decode("utf-8", "ignore")
         except Exception:
@@ -139,6 +235,56 @@ class HarmonyDriver(BaseDriver):
             return current_bundle
         return None
 
+    def _foreground_from_wms(self) -> Optional[str]:
+        try:
+            wms = self._hdc_out(
+                ["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+                timeout=5,
+            ).decode("utf-8", "ignore")
+        except Exception:
+            return None
+
+        focus_id: Optional[str] = None
+        for line in wms.splitlines():
+            m = _FOCUS_WINDOW_RE.search(line)
+            if m:
+                focus_id = m.group(1)
+                break
+        if not focus_id:
+            return None
+
+        pid: Optional[int] = None
+        for line in wms.splitlines():
+            parts = line.split()
+            if len(parts) < 8:
+                continue
+            if parts[3] != focus_id:
+                continue
+            if _WMS_SKIP_WIN_RE.match(parts[0]):
+                continue
+            try:
+                pid = int(parts[2])
+            except ValueError:
+                continue
+            break
+        if pid is None:
+            return None
+
+        try:
+            ps = self._hdc_out(["shell", "ps", "-A", "-o", "pid,args"], timeout=5).decode("utf-8", "ignore")
+        except Exception:
+            return None
+        pid_s = str(pid)
+        for line in ps.splitlines():
+            bits = line.strip().split(None, 1)
+            if len(bits) != 2 or bits[0] != pid_s:
+                continue
+            proc = bits[1].strip().split(":")[0]
+            if not proc or _SYSTEM_FOREGROUND_BUNDLE_RE.match(proc):
+                return None
+            return proc
+        return None
+
     def close_application(self) -> None:
         bundle = self.settings["appPackage"]  
         self._hdc_run(["shell", "aa", "force-stop", bundle], timeout=10)
@@ -147,12 +293,7 @@ class HarmonyDriver(BaseDriver):
         """
         Dump HarmonyOS layout via uitest and normalize to Android-style hierarchy XML.
         """
-        remote = "/data/local/tmp/window_dump.xml"
-        # One round-trip: dump + cat (writes either XML or JSON).
-        raw = self._hdc_out(
-            ["shell", f"uitest dumpLayout -p {remote} >/dev/null && cat {remote}"],
-            timeout=30,
-        ).decode("utf-8", "ignore")
+        raw = self._dump_layout_raw()
 
         xml_ok = self._normalize_hierarchy_xml(raw)
         if xml_ok.strip():
@@ -248,17 +389,44 @@ class HarmonyDriver(BaseDriver):
     def home(self) -> None:
         self._hdc_run(["shell", "uitest", "uiInput", "keyEvent", "Home"], timeout=10)
 
+    @staticmethod
+    def _parse_screen_size(text: str) -> Optional[Tuple[int, int]]:
+        if not text:
+            return None
+        m = _RENDER_RES_RE.search(text)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        mw, mh = _DISPLAY_WIDTH_RE.search(text), _DISPLAY_HEIGHT_RE.search(text)
+        if mw and mh:
+            return int(mw.group(1)), int(mh.group(1))
+        m = _LEGACY_WH_RE.search(text)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m = _WMS_PANEL_RE.search(text)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return None
+
     def get_screen_size(self) -> Tuple[int, int]:
         if self._screen_size_cache is not None:
             return self._screen_size_cache
-        out = self._hdc_out(["shell", "hidumper", "-s", "DisplayManagerService", "-a", "dumpDisplayInfo"], timeout=10).decode(
-            "utf-8", "ignore"
+        dumps = (
+            ["shell", "hidumper", "-s", "RenderService", "-a", "screen"],
+            ["shell", "hidumper", "-s", "DisplayManagerService", "-a", "-a"],
+            ["shell", "hidumper", "-s", "WindowManagerService", "-a", "-a"],
+            ["shell", "hidumper", "-s", "DisplayManagerService", "-a", "dumpDisplayInfo"],
         )
-        m = re.search(r"width\s*=\s*(\d+).*height\s*=\s*(\d+)", out, re.DOTALL)
-        if not m:
-            self._screen_size_cache = (1080, 2400)
-        else:
-            self._screen_size_cache = (int(m.group(1)), int(m.group(2)))
+        for args in dumps:
+            try:
+                out = self._hdc_out(args, timeout=10).decode("utf-8", "ignore")
+            except Exception:
+                continue
+            parsed = self._parse_screen_size(out)
+            if parsed and parsed[0] > 0 and parsed[1] > 0:
+                self._screen_size_cache = parsed
+                return self._screen_size_cache
+        logging.warning("Harmony get_screen_size failed to parse display size; using 1080x2400 fallback")
+        self._screen_size_cache = (1080, 2400)
         return self._screen_size_cache
 
     def run_application(self) -> None:

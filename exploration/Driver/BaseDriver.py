@@ -201,7 +201,12 @@ class BaseDriver(ABC):
 
 
     def reset_to_start_page(self) -> None:
+        pkg = self.settings.get("appPackage")
         for _ in range(5):
+            # Don't Back from desktop / another app — on Harmony that opens
+            # recents/control-center and leaves exploration on a weird screen.
+            if pkg and self.get_foreground_package() != pkg:
+                break
             self.back()
             self.wait()
 
@@ -209,6 +214,10 @@ class BaseDriver(ABC):
         self.wait()
         self.run_application()
         self.wait()
+        # Extra settle after launch (splash / cold start); default 0s.
+        startup_s = float(self.settings.get("app_startup_time", 0) or 0)
+        if startup_s > 0:
+            self.wait(startup_s)
         # we do one scroll up to make sure we are on top of the page
         if not self.settings.get("skip_scroll_up_on_reset", False):
             w, h = self.get_screen_size()
@@ -233,6 +242,13 @@ class BaseDriver(ABC):
                 finish_flag = True
                 break
             else:
+                dbg = getattr(self.agent, "debugger", None)
+                if dbg:
+                    dbg.log(
+                        f"Reset agent action: {getattr(parsed, 'action_type', None)} "
+                        f"{getattr(parsed, 'params', None)} {getattr(parsed, 'orig_coords', None)}",
+                        color="yellow",
+                    )
                 self.execute_action(parsed)
             self.wait()
 
@@ -245,16 +261,18 @@ class BaseDriver(ABC):
         # this method requires agent to be set
         if not self.agent:
             raise ValueError("Agent is not set")
-        
+
+        # At most one extra capture. Extra Harmony snapshots re-open in-app
+        # screenshot-share sheets (Tonghuashun 去分享吧 / 保存图片).
         self.agent.clear_history()
-        for _ in range(3):
-            screenshot = self.take_screenshot()
-            step_result, _ = self.agent.step(instruction="If this is NOT a loading page return finished, else not retrun click(0,0)", screenshot=screenshot)
-            parsed = step_result[0] if isinstance(step_result, tuple) else step_result
-            if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
-                return screenshot
-            self.wait()
-    
-        
+        screenshot = self.take_screenshot()
+        step_result, _ = self.agent.step(
+            instruction="If the app UI is visible (not a loading/splash spinner), terminate. Do not click, swipe, or press back.",
+            screenshot=screenshot,
+        )
+        parsed = step_result[0] if isinstance(step_result, tuple) else step_result
+        if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
+            return screenshot
+        self.wait(1.0)
         return self.take_screenshot()
         
