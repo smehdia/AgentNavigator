@@ -53,6 +53,14 @@ class Walker:
             raw_text=desc, thought=desc, action_type="click", orig_coords={"point": point},
         )
 
+    def _log_selected_action(self, ui_element: dict, parsed_action: ParsedAction) -> None:
+        self.debugger.log(
+            f"Selected action: type={ui_element.get('type')} | "
+            f"{ui_element.get('description')} | bbox={ui_element.get('boundingBox')} | "
+            f"exec={parsed_action.action_type} {parsed_action.params or {}} {parsed_action.orig_coords or {}}",
+            color="cyan",
+        )
+
 
     def resolve_current_screen(self, screenshot, xml_layout, path_node_history, path_action_history, include_path_emphasize=True):
         with self.debugger.time_block("Find node in the graph", color="gray"):
@@ -265,13 +273,18 @@ class Walker:
                     walk_completed = False
                     break
 
+                self._log_selected_action(ui_element, parsed_action)
                 self.driver.execute_action(parsed_action)
                 path_action_history.append(ui_element)
 
                 # check if we are in the app package
                 if self.configs.driver.skip_exploration_for_no_app_package:
-                    if self.driver.get_foreground_package() != self.configs.driver.appPackage:
-                        self.debugger.log(f"Not in app package {self.configs.driver.appPackage} — terminating walk", color="red")
+                    fg = self.driver.get_foreground_package()
+                    if fg != self.configs.driver.appPackage:
+                        self.debugger.log(
+                            f"Not in app package {self.configs.driver.appPackage} (foreground={fg!r}) — terminating walk",
+                            color="red",
+                        )
                         walk_completed = False
                         break
 
@@ -321,8 +334,12 @@ class Walker:
         self.debugger.log(f"BFS node: {bfs_node.node_id}", color="blue")
 
         if self.configs.driver.skip_exploration_for_no_app_package:
-            if self.driver.get_foreground_package() != self.configs.driver.appPackage:
-                self.debugger.log(f"Not in app package {self.configs.driver.appPackage} — terminating walk", color="red")
+            fg = self.driver.get_foreground_package()
+            if fg != self.configs.driver.appPackage:
+                self.debugger.log(
+                    f"Not in app package {self.configs.driver.appPackage} (foreground={fg!r}) — terminating walk",
+                    color="red",
+                )
                 return
 
 
@@ -346,6 +363,7 @@ class Walker:
                 self.debugger.log(f"{reason} — terminating walk", color="red")
                 break
 
+            self._log_selected_action(ui_element, parsed_action)
             self.driver.execute_action(parsed_action)
             screenshot = self.driver.get_non_loading_page()
             xml_layout = self.driver.get_xml_layout()
@@ -412,8 +430,12 @@ class Walker:
             debug_path_screenshot_history_bfs.append(screenshot)
 
         if self.configs.driver.skip_exploration_for_no_app_package:
-            if self.driver.get_foreground_package() != self.configs.driver.appPackage:
-                self.debugger.log(f"Not in app package {self.configs.driver.appPackage} — terminating walk", color="red")
+            fg = self.driver.get_foreground_package()
+            if fg != self.configs.driver.appPackage:
+                self.debugger.log(
+                    f"Not in app package {self.configs.driver.appPackage} (foreground={fg!r}) — terminating walk",
+                    color="red",
+                )
                 return
 
 
@@ -438,7 +460,7 @@ class Walker:
                     self.debugger.log(f"{reason} — terminating walk", color="red")
                     break
 
-                
+                self._log_selected_action(ui_element, parsed_action)
                 self.driver.execute_action(parsed_action)
                 screenshot = self.driver.get_non_loading_page()
                 xml_layout = self.driver.get_xml_layout()
