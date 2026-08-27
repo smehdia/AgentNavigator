@@ -14,6 +14,7 @@ default:
     appActivity: "EntryAbility"
     skip_exploration_for_no_app_package: true # If true, skip exploration when not in the Tonghuashun app package (e.g., after navigating away).
     skip_scroll_up_on_reset: true
+    reset_instruction: "If the Tonghuashun main screen is visible, terminate immediately. Do not click, swipe, share, or press back."
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
