@@ -15,8 +15,8 @@ default:
     skip_scroll_up_on_reset: true
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
-    yibu_api_key: 'sk-3g7iC1zP9DdWrYy1BO7XE01HR8TAWCKiqcLvSDDbNU9ly0Fx'
-    use_yibu_api: false
+    yibu_api_key: 'sk-J56s8hEAdQfWk6PyWxdkbCzH644eu2L7O5OUehIW1QM93YU2'
+    use_yibu_api: true
     model_name_for_page_summary: 'qwen3.5-flash'
     screenshot_longest_side_for_element_extraction_model: 1536
     model_name_for_elements_extraction: 'qwen3.6-plus'

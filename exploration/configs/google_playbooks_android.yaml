@@ -10,15 +10,15 @@ default:
     device_id: "R3CX20L5N6F"
     os_name: "android"
     appPackage: "com.google.android.apps.books"
-    appActivity: ".app.BooksActivity"
+    appActivity: "com.google.android.apps.play.books.home.HomeActivity"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
     app_startup_time: 1
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
-    yibu_api_key: 'sk-3g7iC1zP9DdWrYy1BO7XE01HR8TAWCKiqcLvSDDbNU9ly0Fx'
-    use_yibu_api: false
+    yibu_api_key: 'sk-J56s8hEAdQfWk6PyWxdkbCzH644eu2L7O5OUehIW1QM93YU2'
+    use_yibu_api: true
     model_name_for_page_summary: 'qwen3.5-flash'
     screenshot_longest_side_for_element_extraction_model: 1536
     model_name_for_elements_extraction: 'qwen3.6-plus'
