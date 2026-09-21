@@ -16,6 +16,10 @@ import networkx as nx
 import numpy as np
 from networkx.readwrite import json_graph
 
+# Finish when the selected target node's cosine similarity to the current
+# screenshot exceeds this (not merely because the target appears in top-3).
+AT_TARGET_SIMILARITY_THRESHOLD = 0.9
+
 
 def format_candidate_label(candidate: dict) -> str:
     """Render page_tag + page_purpose for UI labels."""
@@ -216,7 +220,11 @@ def localize_screenshot(
     concat_dim: int,
     gallery_norm: np.ndarray | None = None,
 ) -> dict:
-    """OOD check + top-3 cosine match + next-hop transition hints (inference.py parity)."""
+    """OOD check + top-3 cosine match + next-hop transition hints (inference.py parity).
+
+    Sets at_target when the selected node's cosine similarity to the current
+    screenshot exceeds AT_TARGET_SIMILARITY_THRESHOLD (not merely top-3 membership).
+    """
     shot = letterbox_fn(screenshot, target_hw)
     # OOD only needs SigLIP; skip SmolVLM when off-graph.
     z = localizer_embedder.siglip_feat(shot)
@@ -230,6 +238,7 @@ def localize_screenshot(
         "next_hops": [],
         "transition_hints": [],
         "at_target": False,
+        "target_similarity": None,
     }
     if ood_label != 1:
         return out
@@ -251,10 +260,19 @@ def localize_screenshot(
     top3 = [(feat_node_ids[i], float(sims[i])) for i in top]
     out["top3"] = [{"node_id": nid, "score": score} for nid, score in top3]
 
-    top_ids = {nid for nid, _ in top3}
-    if selected_node_id and selected_node_id in top_ids:
-        out["at_target"] = True
-        return out
+    if selected_node_id:
+        try:
+            target_idx = list(feat_node_ids).index(selected_node_id)
+            target_sim = float(sims[target_idx])
+            out["target_similarity"] = target_sim
+        except ValueError:
+            target_sim = None
+        if (
+            target_sim is not None
+            and target_sim > AT_TARGET_SIMILARITY_THRESHOLD
+        ):
+            out["at_target"] = True
+            return out
 
     next_hops = []
     hints = []
@@ -675,6 +693,7 @@ def run_navigation_loop(
             "next_hops": [],
             "transition_hints": [],
             "at_target": False,
+            "target_similarity": None,
         }
         if localizer is not None:
             localization = localize_screenshot(
@@ -696,13 +715,22 @@ def run_navigation_loop(
         localization_s = time.time() - loc_start
 
         if localization.get("at_target"):
+            target_sim = localization.get("target_similarity")
+            sim_note = (
+                f" (sim={target_sim:.3f})"
+                if isinstance(target_sim, (int, float))
+                else ""
+            )
             action_record = {
                 "type": "finished",
                 "coordinate": None,
                 "direction": None,
                 "start_coordinate": None,
                 "end_coordinate": None,
-                "thought": "Selected node is already among the top-3 localized matches.",
+                "thought": (
+                    "Selected node similarity with current screenshot "
+                    f"exceeds {AT_TARGET_SIMILARITY_THRESHOLD}.{sim_note}"
+                ),
                 "prompt": "",
                 "timing": {
                     "driver_screenshot_s": driver_screenshot_s,
@@ -729,7 +757,7 @@ def run_navigation_loop(
                     }
                 )
             print(
-                f"[step {step_idx + 1}] at_target  "
+                f"[step {step_idx + 1}] at_target{sim_note}  "
                 f"shot={driver_screenshot_s:.2f}s loc={localization_s:.2f}s "
                 f"total={time.time() - step_start:.2f}s"
             )

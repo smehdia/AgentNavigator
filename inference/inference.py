@@ -429,18 +429,32 @@ def execute_single_task(task_prompt, configs, graph, depths, node_intents, node_
             sims = G_gallery @ q
             top = np.argsort(-sims)[:3]
             top3 = [(node_ids[i], float(sims[i])) for i in top]
-            top_ids = {nid for nid, _ in top3}
 
-            if selected_node_id in top_ids:
+            # Finish only when target similarity is high enough — not merely
+            # because the selected node appears in the top-3 matches.
+            AT_TARGET_SIMILARITY_THRESHOLD = 0.9
+            try:
+                target_idx = list(node_ids).index(selected_node_id)
+                target_sim = float(sims[target_idx])
+            except ValueError:
+                target_sim = None
+            if (
+                target_sim is not None
+                and target_sim > AT_TARGET_SIMILARITY_THRESHOLD
+            ):
                 t_loc = time.time() - t0
                 actions.append({
                     "type": "finished",
                     "coordinate": None,
-                    "thought": "The selected node is already in the top 3 nodes.",
+                    "thought": (
+                        "Selected node similarity with current screenshot "
+                        f"exceeds {AT_TARGET_SIMILARITY_THRESHOLD} "
+                        f"(sim={target_sim:.3f})."
+                    ),
                 })
                 screenshots.append(screenshot)
                 print(
-                    f"[step {step_i + 1}] at_target  "
+                    f"[step {step_i + 1}] at_target  sim={target_sim:.3f}  "
                     f"shot={t_shot:.2f}s loc={t_loc:.2f}s total={time.time() - t_step:.2f}s"
                 )
                 finish_flag = True
