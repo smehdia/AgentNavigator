@@ -93,8 +93,11 @@ class BaseDriver(ABC):
     def is_keyboard_open(self) -> bool:
         raise NotImplementedError
 
-    def wait(self, seconds: float = 1.0) -> None:
-        time.sleep(seconds)
+    def wait(self, seconds: float | None = None) -> None:
+        """Settle after an action. Default 1.0s; override via settings `action_wait_s`."""
+        if seconds is None:
+            seconds = float(self.settings.get("action_wait_s", 1.0))
+        time.sleep(max(0.0, float(seconds)))
 
     @staticmethod
     def _best_xy(parsed: ParsedAction) -> Optional[Tuple[int, int]]:
@@ -198,7 +201,10 @@ class BaseDriver(ABC):
 
 
     def reset_to_start_page(self) -> None:
+        pkg = self.settings.get("appPackage")
         for _ in range(5):
+            if pkg and self.get_foreground_package() != pkg:
+                break
             self.back()
             self.wait()
 
@@ -206,6 +212,10 @@ class BaseDriver(ABC):
         self.wait()
         self.run_application()
         self.wait()
+        # Extra settle after launch (splash / cold start); default 0s.
+        startup_s = float(self.settings.get("app_startup_time", 0) or 0)
+        if startup_s > 0:
+            self.wait(startup_s)
         # we do one scroll up to make sure we are on top of the page
         if not self.settings.get("skip_scroll_up_on_reset", False):
             w, h = self.get_screen_size()
@@ -230,6 +240,13 @@ class BaseDriver(ABC):
                 finish_flag = True
                 break
             else:
+                dbg = getattr(self.agent, "debugger", None)
+                if dbg:
+                    dbg.log(
+                        f"Reset agent action: {getattr(parsed, 'action_type', None)} "
+                        f"{getattr(parsed, 'params', None)} {getattr(parsed, 'orig_coords', None)}",
+                        color="yellow",
+                    )
                 self.execute_action(parsed)
             self.wait()
 
@@ -242,16 +259,16 @@ class BaseDriver(ABC):
         # this method requires agent to be set
         if not self.agent:
             raise ValueError("Agent is not set")
-        
+
         self.agent.clear_history()
-        for _ in range(3):
-            screenshot = self.take_screenshot()
-            step_result, _ = self.agent.step(instruction="If this is NOT a loading page return finished, else not retrun click(0,0)", screenshot=screenshot)
-            parsed = step_result[0] if isinstance(step_result, tuple) else step_result
-            if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
-                return screenshot
-            self.wait()
-    
-        
+        screenshot = self.take_screenshot()
+        step_result, _ = self.agent.step(
+            instruction="If the app UI is visible (not a loading/splash spinner), terminate. Do not click, swipe, or press back.",
+            screenshot=screenshot,
+        )
+        parsed = step_result[0] if isinstance(step_result, tuple) else step_result
+        if str(getattr(parsed, "action_type", "") or "").strip().lower() in ("finished", "finish"):
+            return screenshot
+        self.wait(1.0)
         return self.take_screenshot()
         
