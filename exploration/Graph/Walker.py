@@ -214,7 +214,14 @@ class Walker:
                 out_path = os.path.join(self.configs.logs.root, 'debug_paths',f"debug_path_screenshot_history_{self.walk_counter}_{mode}.jpg")
             else:
                 out_path = os.path.join(self.configs.logs.root, 'debug_paths',f"debug_path_screenshot_history_{self.walk_counter}_{mode}_{step}.jpg")
-            cv2.imwrite(out_path, cv2.hconcat(vis))
+            vis_concat = cv2.hconcat(vis)
+            h, w = vis_concat.shape[:2]
+            vis_concat = cv2.resize(
+                vis_concat,
+                (max(1, int(w * 0.75)), max(1, int(h * 0.75))),
+                interpolation=cv2.INTER_AREA,
+            )
+            cv2.imwrite(out_path, vis_concat, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
 
 
     def random_walk(self, max_num_actions, bypass_last_step_action_policy_for_bfs=False, by_pass_increase_walk_counter=False, save_debug_path=False):
