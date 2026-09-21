@@ -3,9 +3,10 @@
 
 For each app directory under explored_apps/:
   1. If the app is not on the Hub (under android/<app> or harmony/<app>),
-     upload the entire local directory.
-  2. If the app is already on the Hub, upload any missing post-process JSON
-     files (edge/node level info, path/user intents, navigation plans).
+     upload the entire local directory (unless --existing-only).
+  2. If the app is already on the Hub, upload local post-process JSON,
+     localizer artifacts, debug_paths/, and screenshots/. Matching remote
+     files are replaced. Use --skip-screenshots to omit the heavy folder.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ for var in [
 ]:
     os.environ.pop(var, None)
 
-from huggingface_hub import HfApi
+from huggingface_hub import CommitOperationDelete, HfApi
 
 REPO_ID = "smehdia/app_navigation"
 REPO_TYPE = "dataset"
@@ -47,6 +48,13 @@ POST_PROCESS_JSON_FILES = (
     "user_intents.json",
     "node_navigation_plans.json",
 )
+LOCALIZER_FILES = (
+    "siglip_smolvlm_features.pt",
+    "ood_classifier.joblib",
+)
+EXISTING_APP_FILES = POST_PROCESS_JSON_FILES + LOCALIZER_FILES
+SCREENSHOTS_DIR = "screenshots"
+DEBUG_PATHS_DIR = "debug_paths"
 
 
 def script_dir() -> Path:
@@ -172,13 +180,71 @@ def list_hf_app_paths(api: HfApi, revision: str) -> dict[str, str]:
     return mapping
 
 
-def remote_has_file(api: HfApi, repo_path: str, filename: str, revision: str) -> bool:
-    return api.file_exists(
-        REPO_ID,
-        f"{repo_path}/{filename}",
-        repo_type=REPO_TYPE,
-        revision=revision,
-    )
+def remote_has_debug_paths(api: HfApi, repo_path: str, revision: str) -> bool:
+    try:
+        items = list(
+            api.list_repo_tree(
+                REPO_ID,
+                repo_type=REPO_TYPE,
+                revision=revision,
+                path_in_repo=f"{repo_path}/{DEBUG_PATHS_DIR}",
+                recursive=False,
+            )
+        )
+    except Exception:
+        return False
+    return bool(items)
+
+
+def delete_remote_debug_paths(
+    api: HfApi,
+    hf_apps: dict[str, str],
+    revision: str,
+    dry_run: bool,
+    only: list[str] | None = None,
+) -> int:
+    """Delete debug_paths/ folders from Hub apps. Returns 0 on success."""
+    targets = sorted(hf_apps.items())
+    if only:
+        unknown = sorted(set(only) - set(hf_apps))
+        if unknown:
+            print(f"error: unknown Hub app(s): {', '.join(unknown)}", file=sys.stderr)
+            return 1
+        only_set = set(only)
+        targets = [(name, path) for name, path in targets if name in only_set]
+
+    to_delete: list[str] = []
+    for app_name, repo_path in targets:
+        folder = f"{repo_path}/{DEBUG_PATHS_DIR}"
+        if remote_has_debug_paths(api, repo_path, revision):
+            print(f"{app_name}: will delete {folder}/")
+            to_delete.append(folder)
+        else:
+            print(f"{app_name}: no {DEBUG_PATHS_DIR}/ on Hub")
+
+    print(f"\n{len(to_delete)} debug_paths folder(s) to delete")
+    if dry_run or not to_delete:
+        return 0
+
+    operations = [
+        CommitOperationDelete(path_in_repo=folder, is_folder=True) for folder in to_delete
+    ]
+    # Hub commit size limits: delete in batches of folders.
+    batch_size = 40
+    for start in range(0, len(operations), batch_size):
+        batch = operations[start : start + batch_size]
+        first = to_delete[start]
+        last = to_delete[min(start + batch_size, len(to_delete)) - 1]
+        print(f"deleting batch {start + 1}-{start + len(batch)}: {first} .. {last}")
+        api.create_commit(
+            repo_id=REPO_ID,
+            repo_type=REPO_TYPE,
+            revision=revision,
+            operations=batch,
+            commit_message=f"Remove debug_paths folders ({start + 1}-{start + len(batch)})",
+        )
+    print("Done: deleted remote debug_paths folders")
+    return 0
 
 
 def upload_file(
@@ -198,7 +264,7 @@ def upload_file(
         repo_id=REPO_ID,
         repo_type=REPO_TYPE,
         revision=revision,
-        commit_message=f"Add {path_in_repo}",
+        commit_message=f"Upload {path_in_repo}",
     )
     print(f"uploaded {local_path} -> {path_in_repo}")
 
@@ -220,44 +286,79 @@ def upload_app_directory(
         repo_id=REPO_ID,
         repo_type=REPO_TYPE,
         revision=revision,
-        commit_message=f"Add {repo_path}/",
+        commit_message=f"Upload {repo_path}/",
     )
     print(f"uploaded folder {local_dir} -> {repo_path}/")
 
 
-def upload_missing_post_process_json(
+def upload_existing_app_files(
     api: HfApi,
     app_dir: Path,
     repo_path: str,
     revision: str,
     dry_run: bool,
+    skip_screenshots: bool = False,
+    debug_paths_only: bool = False,
 ) -> tuple[int, int]:
-    """Upload missing post-process JSON files. Returns (uploaded, skipped)."""
+    """Upload localizer artifacts, post-process JSON, debug_paths/, and screenshots/.
+
+    Local files overwrite the same path on the Hub. Returns (uploaded, skipped).
+    """
     uploaded = 0
     skipped = 0
+    allow_patterns: list[str] = []
 
-    for filename in POST_PROCESS_JSON_FILES:
-        local_path = app_dir / filename
-        if not local_path.is_file():
-            print(f"skip {repo_path}/{filename}: local file missing")
+    if debug_paths_only:
+        skip_screenshots = True
+    else:
+        for filename in EXISTING_APP_FILES:
+            local_path = app_dir / filename
+            if not local_path.is_file():
+                print(f"skip {repo_path}/{filename}: local file missing")
+                skipped += 1
+                continue
+            allow_patterns.append(filename)
+
+    debug_dir = app_dir / DEBUG_PATHS_DIR
+    if not debug_dir.is_dir() or not any(debug_dir.iterdir()):
+        print(f"skip {repo_path}/{DEBUG_PATHS_DIR}/: local folder missing or empty")
+        skipped += 1
+    else:
+        allow_patterns.append(f"{DEBUG_PATHS_DIR}/**")
+
+    if skip_screenshots:
+        print(f"skip {repo_path}/{SCREENSHOTS_DIR}/: --skip-screenshots")
+        skipped += 1
+    else:
+        screenshots_dir = app_dir / SCREENSHOTS_DIR
+        if not screenshots_dir.is_dir() or not any(screenshots_dir.iterdir()):
+            print(f"skip {repo_path}/{SCREENSHOTS_DIR}/: local folder missing or empty")
             skipped += 1
-            continue
+        else:
+            allow_patterns.append(f"{SCREENSHOTS_DIR}/**")
 
-        if remote_has_file(api, repo_path, filename, revision):
-            print(f"skip {repo_path}/{filename}: already on Hub")
-            skipped += 1
-            continue
+    if not allow_patterns:
+        return uploaded, skipped
 
-        upload_file(
-            api,
-            local_path,
-            f"{repo_path}/{filename}",
-            revision,
-            dry_run,
-        )
-        uploaded += 1
+    if dry_run:
+        print(f"[dry-run] would upload {app_dir} -> {repo_path}/ ({', '.join(allow_patterns)})")
+        return 1, skipped
 
-    return uploaded, skipped
+    api.upload_folder(
+        folder_path=str(app_dir),
+        path_in_repo=repo_path,
+        repo_id=REPO_ID,
+        repo_type=REPO_TYPE,
+        revision=revision,
+        allow_patterns=allow_patterns,
+        commit_message=(
+            f"Update {repo_path}/ debug_paths"
+            if debug_paths_only
+            else f"Update {repo_path}/ (JSON, localizer, debug_paths)"
+        ),
+    )
+    print(f"uploaded {app_dir} -> {repo_path}/ ({', '.join(allow_patterns)})")
+    return 1, skipped
 
 
 def main() -> int:
@@ -265,7 +366,8 @@ def main() -> int:
         description=(
             "Upload explored apps to "
             f"https://huggingface.co/datasets/{REPO_ID}: full directory if missing, "
-            "otherwise any missing post-process JSON files."
+            "otherwise local post-process JSON, localizer artifacts, debug_paths, "
+            "and screenshots (replacing matching Hub files)."
         )
     )
     parser.add_argument(
@@ -294,11 +396,43 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--existing-only",
+        action="store_true",
+        help="Only update apps already on the Hub; do not upload new app directories.",
+    )
+    parser.add_argument(
+        "--skip-screenshots",
+        action="store_true",
+        help="When updating existing Hub apps, do not upload screenshots/.",
+    )
+    parser.add_argument(
+        "--debug-paths-only",
+        action="store_true",
+        help="When updating existing Hub apps, upload only debug_paths/.",
+    )
+    parser.add_argument(
+        "--delete-debug-paths",
+        action="store_true",
+        help="Delete debug_paths/ folders from Hub apps (no upload).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print actions without uploading.",
+        help="Print actions without uploading or deleting.",
     )
     args = parser.parse_args()
+
+    api = HfApi()
+    hf_apps = list_hf_app_paths(api, args.revision)
+
+    if args.delete_debug_paths:
+        return delete_remote_debug_paths(
+            api,
+            hf_apps,
+            args.revision,
+            args.dry_run,
+            args.app or None,
+        )
 
     root = explored_apps_root(args.root)
     if not root.is_dir():
@@ -314,9 +448,6 @@ def main() -> int:
     if args.get_stat:
         return print_agent_data_stats(root, local_apps)
 
-    api = HfApi()
-    hf_apps = list_hf_app_paths(api, args.revision)
-
     uploaded = 0
     skipped = 0
 
@@ -325,6 +456,10 @@ def main() -> int:
         repo_path = hf_apps.get(app_name)
 
         if repo_path is None:
+            if args.existing_only:
+                print(f"{app_name}: not on Hub; skipping (--existing-only)")
+                skipped += 1
+                continue
             platform = resolve_platform(app_dir, app_name)
             repo_path = f"{platform}/{app_name}"
             print(f"{app_name}: not on Hub; uploading directory -> {repo_path}/")
@@ -332,14 +467,24 @@ def main() -> int:
             uploaded += 1
             continue
 
-        print(f"{app_name}: on Hub at {repo_path}; checking post-process JSON files")
-        file_uploaded, file_skipped = upload_missing_post_process_json(
-            api,
-            app_dir,
-            repo_path,
-            args.revision,
-            args.dry_run,
+        print(
+            f"{app_name}: on Hub at {repo_path}; "
+            "uploading local files (replace if already present)"
         )
+        try:
+            file_uploaded, file_skipped = upload_existing_app_files(
+                api,
+                app_dir,
+                repo_path,
+                args.revision,
+                args.dry_run,
+                skip_screenshots=args.skip_screenshots,
+                debug_paths_only=args.debug_paths_only,
+            )
+        except Exception as exc:
+            print(f"{app_name}: FAILED ({exc})", file=sys.stderr)
+            skipped += 1
+            continue
         uploaded += file_uploaded
         skipped += file_skipped
 
