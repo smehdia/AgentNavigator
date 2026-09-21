@@ -2,9 +2,50 @@
 
 Run a natural-language navigation goal on a **physical device** using an explored app graph. Inference **retrieves** a target screen from exploration artifacts, then drives the UI agent step-by-step. Each step uses an **OOD classifier** (on/off-graph) and a **SigLIP+SmolVLM gallery localizer** to suggest next-hop transition hints to the agent.
 
-**Prerequisites:** Complete [exploration](../exploration/README.md), **post-processing**, and **localizer training** (`train_localizer.py`) for the same app so `logs.root` contains `graph.json`, `user_intents.json`, `node_level_information.json`, `edge_level_information.json`, `screenshots/`, `ood_classifier.joblib`, and `siglip_smolvlm_features.pt`.
+**Prerequisites:** Complete [exploration](../exploration/README.md), **post-processing**, and **localizer training** (`train_localizer.py`) for the same app so `logs.root` contains `graph.json`, `user_intents.json`, `node_level_information.json`, `edge_level_information.json`, `screenshots/`, `ood_classifier.joblib`, and `siglip_smolvlm_features.pt`. Start the [MAI-UI server](#first-run-the-mai-ui-server) before the GUI or CLI.
 
 **Recommended for demos:** use the [Inference GUI](#inference-gui-demo-wizard) (`run_gui.sh`) — a browser wizard that walks through config, device checks, retrieval, and on-device navigation. For scripted or batch runs, use the [CLI](#quick-start-cli) (`inference.py`).
+
+---
+
+## First: run the MAI-UI server
+
+Inference does not load MAI-UI itself. Start the OpenAI-compatible vision server from [`smehdia/maiui_8b_llamacpp_quantized`](https://huggingface.co/smehdia/maiui_8b_llamacpp_quantized/tree/main) first, then point `agent.url` at it.
+
+The package ships a CUDA `llama-server`, the Q4_K_M weights, the vision projector, and `start_server.sh`.
+
+**Target machine**
+
+- Linux x86_64
+- NVIDIA GPU with CUDA 12+ drivers (built for RTX 50-series / sm_120)
+- About 11 GB VRAM (16 GB GPU recommended)
+
+**Download and start**
+
+```bash
+huggingface-cli download smehdia/maiui_8b_llamacpp_quantized --local-dir maiui_8b_llamacpp_quantized
+cd maiui_8b_llamacpp_quantized
+chmod +x start_server.sh
+CUDA_VISIBLE_DEVICES=0 ./start_server.sh
+```
+
+The API listens on `http://localhost:8080/v1`.
+
+**Verify**
+
+```bash
+curl http://localhost:8080/v1/models
+```
+
+In the inference config, set:
+
+```yaml
+agent:
+  url: "http://localhost:8080/v1"   # or http://<server-host>:8080/v1
+  model_name: "mai_ui"
+```
+
+Leave the server running for the rest of the GUI or CLI run. An alternate vLLM setup is described under [MAI-UI server (vLLM)](#mai-ui-server-vllm).
 
 ---
 
@@ -38,7 +79,7 @@ inference/
 | **GUI extras** | `pip install -r gui_demo/requirements-gui.txt` (FastAPI, uvicorn, PyYAML) |
 | **Node.js 18+** | For `npm install` / `npm run build` in `gui_demo/web/` |
 | **ADB device** | Emulator or physical device visible in `adb devices` |
-| **Agent server** | MAI-UI or UI-TARS at the `agent.url` in config |
+| **Agent server** | [MAI-UI server](#first-run-the-mai-ui-server) (or UI-TARS) at the `agent.url` in config |
 
 Pick or edit a config under `inference/configs/` (e.g. `outlook_android.yaml`). Set `driver.device_id`, `logs.root` (path to explored app output), and API keys before the demo.
 
@@ -261,24 +302,9 @@ Enter your query:
 
 ## YAML config files
 
-Configs live in `inference/configs/`. Each file has a top-level `default:` block loaded by [Dynaconf](https://www.dynaconf.com/).
+Configs live in `inference/configs/`. Each file has a top-level `default:` block loaded by [Dynaconf](https://www.dynaconf.com/). There is one YAML per exploration app, with the same filename as `exploration/configs/` (for example `clock_android.yaml`, `zhixing_train_harmony.yaml`). `app`, `driver` (including `appModule`, `reset_instruction`, `skip_scroll_up_on_reset`, and `app_startup_time` when set), and `logs.root` are taken from that exploration config. `vlm.yibu_api_key` matches the exploration configs.
 
-| Config | App | Platform |
-|--------|-----|----------|
-| `airbnb_android.yaml` | Airbnb | Android |
-| `alibaba_harmony.yaml` | Alibaba | HarmonyOS |
-| `amazon_android.yaml` | Amazon | Android |
-| `clock_android.yaml` | Clock | Android |
-| `ebay_android.yaml` | eBay | Android |
-| `google_maps_android.yaml` | Google Maps | Android |
-| `linkedin_android.yaml` | LinkedIn | Android |
-| `outlook_android.yaml` | Outlook | Android (includes batch-mode example) |
-| `target_android.yaml` | Target | Android |
-| `yelp_android.yaml` | Yelp | Android |
-| `youtube_android.yaml` | YouTube | Android |
-| `zhixing_train_harmony.yaml` | Zhixing Train Tickets | HarmonyOS |
-
-Copy an existing config and adjust `device_id`, API keys, `logs.root`, and paths for your setup.
+`outlook_android.yaml` includes a batch-mode `input_dir` example. Copy an existing config and adjust `device_id`, API keys, `logs.root`, and paths for your setup.
 
 ### `app`
 
@@ -331,7 +357,7 @@ The on-device navigation model (MAI-UI or UI-TARS). Built by `Agents.factory.bui
 
 #### MAI-UI server (vLLM)
 
-When `model_name` is `mai_ui`, serve **HuggingFace** [`Tongyi-MAI/MAI-UI-8B`](https://huggingface.co/Tongyi-MAI/MAI-UI-8B) behind an OpenAI-compatible endpoint.
+The packaged llama.cpp server is in [First: run the MAI-UI server](#first-run-the-mai-ui-server). This section covers serving [`Tongyi-MAI/MAI-UI-8B`](https://huggingface.co/Tongyi-MAI/MAI-UI-8B) yourself with vLLM.
 
 **vLLM version:** use **vLLM &lt; 0.2** (the official MAI-UI stack pins **`vllm==0.11.0`**). **vLLM 0.21+** has been observed to return plausible reasoning but **wrong grounding coordinates** (taps land on the wrong UI element). Pin compatible deps on the server, e.g. `transformers==4.57.6` (&lt; 5.0), `tokenizers` 0.22.x, `numpy≤2.2`.
 
