@@ -11,6 +11,7 @@ default:
     os_name: "harmony"
     appPackage: "com.sdu.didi.hmos.psnger"
     appActivity: "EntryAbility"
+    appModule: "app"
     skip_exploration_for_no_app_package: true
     skip_scroll_up_on_reset: true
     reset_instruction: "If there is an advertisement or pop up close it. If there is not return finished."
