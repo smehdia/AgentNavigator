@@ -1,0 +1,45 @@
+default:
+
+  debug_mode: False
+
+  app:
+    name: "Jiakao Baodian"
+    description: "Jiakao Baodian (驾考宝典) is a driving test prep app for studying for the Chinese driver's license exam, including practice questions and mock tests."
+
+  driver:
+    device_id: "3AP0224B05003112"
+    os_name: "harmony"
+    appPackage: "cn.mucang.hm.jiakao"
+    appActivity: "EntryAbility"
+    skip_exploration_for_no_app_package: true
+    skip_scroll_up_on_reset: true
+    reset_instruction: "if there is an advertisement block the page close it (by clicking on x or somewhere else) then go to exam tab (考试) then return finish."
+
+  vlm:
+    alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
+    yibu_api_key: 'sk-J56s8hEAdQfWk6PyWxdkbCzH644eu2L7O5OUehIW1QM93YU2'
+    use_yibu_api: true
+
+  agent:
+    verbose_print: false
+    url: "http://10.218.163.104:8000/v1"
+    model_name: "mai_ui"
+    settings: 
+      history_n: 3
+      resize_factor: 0.5
+      model_thinking: true
+      max_tokens_no_thinking: 128
+    max_steps: 10
+
+  logs:
+    root: "../exploration/explored_apps/jiakao_baodian_harmony"
+    resume_from_checkpoint: true
+
+  batch_mode: false
+  output_dir: "./results"
+
+  use_memory_for_navigation: true
+  query: ""
+  top_k_in_first_stage_retrieval: 30
+  top_k_retrieval_in_stage_2: 5
+  pick_candidate_index: 0    # 0 means best candidate, 1 means second best, ... -1 means use gradio to pick candidate  (has to be less than top_k_retrieval_in_stage_2)

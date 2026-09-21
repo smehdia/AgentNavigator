@@ -18,7 +18,7 @@ default:
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
-    yibu_api_key: 'sk-RBKsBNgCvZPw61tyyJjZZS78ewggEyoTDIRCtZ5hxKVqQpHa'
+    yibu_api_key: 'sk-J56s8hEAdQfWk6PyWxdkbCzH644eu2L7O5OUehIW1QM93YU2'
     use_yibu_api: true
 
   agent:

@@ -18,17 +18,18 @@ default:
 
   vlm:
     alibaba_api_key: 'sk-9e08c5810b434d9db9a335e1cca2a02a'
-    yibu_api_key: 'sk-caIdHUNLbUgJ4vpB3LFT2FQhpV4ELNgmL5PXBGgJq1kvLL8C'
+    yibu_api_key: 'sk-J56s8hEAdQfWk6PyWxdkbCzH644eu2L7O5OUehIW1QM93YU2'
     use_yibu_api: true
 
   agent:
     verbose_print: false
-    url: "http://10.193.241.177:8090/v1"
+    url: "http://10.218.163.104:8000/v1"
     model_name: "mai_ui"
     settings: 
       history_n: 3
-      resize_factor: 0.75
+      resize_factor: 0.5
       model_thinking: true
+      max_tokens_no_thinking: 128
     max_steps: 10
 
   logs:
